@@ -28,14 +28,18 @@ type headlessWebView struct {
 }
 
 func newHeadless(opts types.Options) (Platform, error) {
-	return &headlessWebView{
+	w := &headlessWebView{
 		title:       opts.Title,
 		width:       opts.Width,
 		height:      opts.Height,
 		bindings:    make(map[string]func([]any) (any, error)),
 		rawBindings: make(map[string]func(json.RawMessage) (json.RawMessage, error)),
 		schemes:     make(map[string]types.SchemeHandler),
-	}, nil
+	}
+	for scheme, handler := range opts.Schemes {
+		w.schemes[scheme] = handler
+	}
+	return w, nil
 }
 
 func (w *headlessWebView) Run() error {

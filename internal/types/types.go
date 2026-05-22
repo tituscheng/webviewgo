@@ -33,6 +33,11 @@ type Options struct {
 	// Not yet implemented by any backend; the callback is currently never
 	// invoked.
 	OnDrop func(files []string)
+	// Schemes registers custom URL scheme handlers before the native webview is
+	// created. Required on macOS where WKURLSchemeHandler must be installed on
+	// WKWebViewConfiguration prior to WKWebView creation. Handlers registered
+	// here are also applied on Linux and headless backends at creation time.
+	Schemes map[string]SchemeHandler
 }
 
 // Cookie represents an HTTP cookie with session isolation.

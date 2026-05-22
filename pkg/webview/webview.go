@@ -241,7 +241,10 @@ func (w *webview) CookieManager() CookieManager {
 }
 
 func (w *webview) RegisterScheme(scheme string, handler SchemeHandler) error {
-	return w.platform.RegisterScheme(scheme, handler)
+	if err := w.platform.RegisterScheme(scheme, handler); err != nil {
+		return fmt.Errorf("webview: RegisterScheme %q: %w", scheme, err)
+	}
+	return nil
 }
 
 func (w *webview) OpenDialog(opts OpenDialogOptions) ([]string, error) {

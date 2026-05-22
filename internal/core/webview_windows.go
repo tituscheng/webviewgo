@@ -48,13 +48,14 @@ import "C"
 import (
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"runtime"
 	"sync"
 	"sync/atomic"
+	"time"
 	"unsafe"
 
 	"github.com/tituscheng/webviewgo/internal/types"
-	"log/slog"
 )
 
 // The WebView2 backend keeps the controller/webview in C global state, so only
@@ -149,7 +150,8 @@ func (w *windowsWebView) Destroy() error {
 	w.Terminate()
 	select {
 	case <-w.done:
-	default:
+	case <-time.After(5 * time.Second):
+		w.logger.Warn("destroy timed out waiting for message loop exit")
 	}
 	C.wvDestroyWebView2()
 	releaseHandle(w.handle)
@@ -389,43 +391,19 @@ func goWebViewMessageReceived(handle C.uintptr_t, name *C.char, body *C.char) {
 	b := C.GoString(body)
 
 	if n == "goBridge" {
-		var msg struct {
-			Bind string          `json:"bind"`
-			Args json.RawMessage `json:"args"`
-			CB   string          `json:"cb"`
-		}
-		if err := json.Unmarshal([]byte(b), &msg); err != nil {
-			ww.logger.Error("failed to unmarshal bridge message", "error", err)
-			return
-		}
-
-		// Prefer the raw (high-perf) binding, then fall back to the normal one.
-		ww.mu.RLock()
-		rawFn := ww.rawBindings[msg.Bind]
-		normalFn := ww.bindings[msg.Bind]
-		ww.mu.RUnlock()
-
-		if rawFn == nil && normalFn == nil {
-			ww.logger.Warn("unknown binding", "name", msg.Bind)
-			return
-		}
-
-		go func() {
-			defer func() {
-				if r := recover(); r != nil {
-					ww.logger.Error("binding callback panic", "name", msg.Bind, "recover", r)
-				}
-			}()
-
-			script := bindResponseScript(msg.CB, msg.Args, rawFn, normalFn)
-			if ww.isTerminated() {
-				return
-			}
-			// Hop to the UI thread via the batching pump (WebView2 eval is
-			// UI-thread only; batching amortizes the cgo/dispatch cost).
-			ww.pump.enqueue(script)
-		}()
+		parseBridgeMessage(newPlatformBridgeHost(
+			ww.lookupBinding,
+			ww.isTerminated,
+			ww.pump.enqueue,
+			ww.logger,
+		), b)
 	}
+}
+
+func (w *windowsWebView) lookupBinding(name string) bridgeBindings {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	return bridgeBindings{w.rawBindings[name], w.bindings[name]}
 }
 
 //export goWebViewWindowWillClose

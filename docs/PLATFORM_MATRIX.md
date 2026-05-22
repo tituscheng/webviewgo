@@ -23,13 +23,13 @@ Feature-by-platform capability matrix. This is the source of truth for what work
 | `Show()` / `Hide()` | ✅ | ✅ | ✅ | ➖ |
 | `SetTitle()` | ✅ | ✅ | ✅ | ✅ |
 | `SetSize()` | ✅ | ✅ | ✅ | ✅ |
-| `SetMinSize()` | ✅ | ❌ | ❌ | ❌ |
-| `SetMaxSize()` | ✅ | ❌ | ❌ | ❌ |
-| `SetFullscreen()` | ✅ | ❌ | ❌ | ❌ |
-| `SetAlwaysOnTop()` | ✅ | ❌ | ❌ | ❌ |
+| `SetMinSize()` | ✅ | ✅ | ⚠️ | ➖ |
+| `SetMaxSize()` | ✅ | ✅ | ⚠️ | ➖ |
+| `SetFullscreen()` | ✅ | ✅ | ⚠️ | ➖ |
+| `SetAlwaysOnTop()` | ✅ | ✅ | ⚠️ | ➖ |
 | Frameless window | ⚠️ (style only) | ❌ | ❌ | ➖ |
-| Transparent window | ❌ | ❌ | ❌ | ➖ |
-| Center window | ✅ (always) | ❌ | ❌ | ➖ |
+| Transparent window | ⚠️ (window only) | ❌ | ❌ | ➖ |
+| Center window | ✅ | ❌ | ❌ | ➖ |
 
 ## Navigation
 
@@ -47,20 +47,23 @@ Feature-by-platform capability matrix. This is the source of truth for what work
 |---------|:-----:|:-----:|:-------:|:--------:|
 | `Eval(script)` | ✅ | ✅ | ✅ | ✅ (stores script) |
 | `Bind(name, fn)` — register | ✅ | ✅ | ✅ | ✅ |
-| `Bind()` — JS→Go call | ✅ | ✅ | ❌ | ➖ |
-| `Bind()` — Go→JS response | ✅ | ✅ | ❌ | ➖ |
-| Promise wrapper | ✅ | ✅ | ❌ | ➖ |
-| TypeScript generation | ❌ | ❌ | ❌ | ➖ |
+| `BindRaw(name, fn)` | ✅ | ✅ | ✅ | ✅ |
+| `Bind()` — JS→Go call | ✅ | ✅ | ✅ | ➖ |
+| `Bind()` — Go→JS response | ✅ | ✅ | ✅ | ➖ |
+| Promise wrapper | ✅ | ✅ | ✅ | ➖ |
+| Bridge callback validation | ✅ | ✅ | ✅ | ➖ |
+| TypeScript generation | ✅ | ✅ | ✅ | ➖ |
 
 ## Custom Protocols
 
 | Feature | macOS | Linux | Windows | Headless |
 |---------|:-----:|:-----:|:-------:|:--------:|
-| `RegisterScheme()` | ✅ | ❌ | ❌ | ✅ |
-| `FSHandler` adapter | ❌ | ❌ | ❌ | ❌ |
-| `HTTPHandler` adapter | ❌ | ❌ | ❌ | ❌ |
-| Response delivery | ✅ | ❌ | ❌ | ➖ |
-| Request body forwarding | ✅ | ➖ | ➖ | ➖ |
+| `Options.Schemes` (pre-register) | ✅ | ✅ | ➖ | ✅ |
+| `RegisterScheme()` after `New()` | ⚠️ (error) | ✅ | ❌ | ✅ |
+| `FSHandler` adapter | ✅ | ✅ | ✅ | ✅ |
+| `HTTPHandler` adapter | ✅ | ✅ | ✅ | ✅ |
+| Response delivery | ✅ | ✅ | ❌ | ➖ |
+| Request body forwarding | ✅ | ✅ | ➖ | ➖ |
 
 ## Cookies & Sessions
 
@@ -70,17 +73,18 @@ Feature-by-platform capability matrix. This is the source of truth for what work
 | `http.CookieJar` impl | ✅ | ✅ | ✅ | ✅ |
 | Session isolation | ✅ | ✅ | ✅ | ✅ |
 | Native cookie sync | ✅ | ❌ | ❌ | ➖ |
-| `SameSite` sync | ❌ | ❌ | ❌ | ➖ |
+| `SameSite` sync | ✅ | ❌ | ❌ | ➖ |
+| `HostOnly` sync | ✅ | ❌ | ❌ | ➖ |
 
 ## Dialogs
 
 | Feature | macOS | Linux | Windows | Headless |
 |---------|:-----:|:-----:|:-------:|:--------:|
-| `OpenDialog()` | ✅ | ❌ | ✅ | ❌ |
-| `SaveDialog()` | ✅ | ❌ | ✅ | ❌ |
-| `MessageDialog()` | ✅ | ❌ | ✅ | ❌ |
-| File filters | ❌ | ❌ | ❌ | ➖ |
-| Multiple file selection | ✅ | ❌ | ❌ | ➖ |
+| `OpenDialog()` | ✅ | ✅ | ✅ | ❌ |
+| `SaveDialog()` | ✅ | ✅ | ✅ | ❌ |
+| `MessageDialog()` | ✅ | ✅ | ✅ | ❌ |
+| File filters | ✅ | ⚠️ | ⚠️ | ➖ |
+| Multiple file selection | ✅ | ✅ | ✅ | ➖ |
 
 ## System Integration
 
@@ -101,8 +105,9 @@ Feature-by-platform capability matrix. This is the source of truth for what work
 | Headless mode | ✅ | ✅ | ✅ | ✅ |
 | Profile isolation | ✅ | ✅ | ✅ | ✅ |
 | `WEBVIEW_DATA_DIR` override | ✅ | ✅ | ✅ | ✅ |
-| Custom UserAgent | ⚠️ (JS hack) | ⚠️ (JS hack) | ⚠️ (JS hack) | ➖ |
+| Custom UserAgent | ✅ | ✅ | ⚠️ (JS fallback) | ➖ |
 | Proxy support | ❌ | ❌ | ❌ | ➖ |
+| Integration tests (`//go:build integration`) | ✅ | ✅ | ✅ | ✅ |
 
 ---
 
@@ -110,7 +115,7 @@ Feature-by-platform capability matrix. This is the source of truth for what work
 
 | Platform | Status | Usable For |
 |----------|--------|------------|
-| **macOS** | 🟢 Production-ready | Navigation, JS interop, dialogs, cookies, clipboard, notifications |
-| **Linux** | 🔴 Broken | Basic navigation works; JS interop completely broken due to wrong API + thread safety |
-| **Windows** | 🟡 Partially Ready | WebView2 init, navigation, JS interop, dialogs, clipboard all work. RegisterScheme missing. Needs Windows testing. |
-| **Headless** | 🟢 CI-ready | All non-UI operations work; useful for unit testing |
+| **macOS** | 🟢 Production-ready | Navigation, JS interop, custom schemes (via `Options.Schemes`), dialogs, cookies, clipboard |
+| **Linux** | 🟡 Mostly Ready | Navigation, JS interop, custom schemes, dialogs, window chrome; notifications missing |
+| **Windows** | 🟡 Mostly Ready | WebView2 init, navigation, JS interop, dialogs, clipboard; `RegisterScheme` missing |
+| **Headless** | 🟢 CI-ready | All non-UI operations work; useful for unit and integration testing |

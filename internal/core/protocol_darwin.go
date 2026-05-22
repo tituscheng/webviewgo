@@ -10,21 +10,12 @@ package core
 // Forward declaration for the response delivery function defined in protocol_darwin_delegate.m
 extern void deliverSchemeResponse(uintptr_t reqHandle, int statusCode, char *headers,
                                   void *body, int bodyLen);
-
-static void registerScheme(void *configPtr, const char *scheme, uintptr_t handle) {
-    WKWebViewConfiguration *config = (WKWebViewConfiguration *)configPtr;
-    SchemeHandlerDelegate *delegate = [[SchemeHandlerDelegate alloc] init];
-    delegate.handle = handle;
-    delegate.scheme = [NSString stringWithUTF8String:scheme];
-    [config setURLSchemeHandler:delegate forURLScheme:[NSString stringWithUTF8String:scheme]];
-}
 */
 import "C"
 import (
 	"fmt"
 	"io"
 	"net/http"
-	"strings"
 	"unsafe"
 
 	"github.com/tituscheng/webviewgo/internal/types"
@@ -35,17 +26,28 @@ func (w *darwinWebView) RegisterScheme(scheme string, handler types.SchemeHandle
 	defer w.mu.Unlock()
 	w.schemes[scheme] = handler
 
-	// Note: WKURLSchemeHandler must be registered before the WKWebView is created.
-	// Since our webview is already created, this only works if we re-create the webview
-	// or if the scheme was pre-registered. For now, return an error if the webview exists.
 	if w.webView != nil {
-		// TODO: support dynamic scheme registration by recreating webview or using a proxy.
-		return fmt.Errorf("core: schemes must be registered before navigation on darwin")
+		return fmt.Errorf("webview: RegisterScheme %q: on macOS custom schemes must be registered via Options.Schemes before New(); WKURLSchemeHandler cannot be installed after the webview is created", scheme)
 	}
 	return nil
 }
 
-const maxSchemeBodySize = 100 << 20 // 100 MiB
+// schemeNamesToC converts scheme map keys to a C string array for native
+// registration at webview creation time.
+func schemeNamesToC(schemes map[string]types.SchemeHandler) ([]*C.char, func()) {
+	if len(schemes) == 0 {
+		return nil, func() {}
+	}
+	names := make([]*C.char, 0, len(schemes))
+	for scheme := range schemes {
+		names = append(names, C.CString(scheme))
+	}
+	return names, func() {
+		for _, p := range names {
+			C.free(unsafe.Pointer(p))
+		}
+	}
+}
 
 // deliverText completes a scheme task with a plain-text status response.
 func deliverText(reqHandle C.uintptr_t, status int, msg string) {
@@ -54,31 +56,6 @@ func deliverText(reqHandle C.uintptr_t, status int, msg string) {
 	C.deliverSchemeResponse(reqHandle, C.int(status), headers, unsafe.Pointer(body), C.int(len(msg)))
 	C.free(unsafe.Pointer(headers))
 	C.free(unsafe.Pointer(body))
-}
-
-// headerBlob renders an http.Header as "Key: Value\n" lines for the cgo call.
-func headerBlob(h http.Header) string {
-	var b strings.Builder
-	for k, vals := range h {
-		for _, v := range vals {
-			b.WriteString(k)
-			b.WriteString(": ")
-			b.WriteString(v)
-			b.WriteByte('\n')
-		}
-	}
-	return b.String()
-}
-
-// parseHeaderBlob parses "Key: Value\n" lines back into an http.Header.
-func parseHeaderBlob(s string) http.Header {
-	h := http.Header{}
-	for _, line := range strings.Split(s, "\n") {
-		if i := strings.Index(line, ": "); i >= 0 {
-			h.Add(line[:i], line[i+2:])
-		}
-	}
-	return h
 }
 
 //export goProtocolHandler

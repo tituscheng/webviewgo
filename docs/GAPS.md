@@ -24,13 +24,15 @@ Comprehensive inventory of all known gaps, stubs, TODOs, and technical debt in t
 | D04 | 🟢 | `SchemeHandlerDelegate` memory leak (non-ARC `retain`) | `internal/core/protocol_darwin_delegate.m` | ✅ Fixed | Added `dealloc` with `[_scheme release]` |
 | D05 | 🟠 | `UserAgent` set via JS hack instead of native API | `pkg/webview/webview.go` | ✅ Fixed | Native `customUserAgent` on macOS, `webkit_settings_set_user_agent` on Linux. Windows still uses JS fallback. |
 | D06 | 🟠 | Frameless/Transparent options incomplete | `internal/core/webview_darwin.go` | ✅ Fixed | `setOpaque:NO` + `setBackgroundColor:[NSColor clearColor]` on window. WebView transparency requires page CSS. |
-| D07 | 🟢 | `Center` option ignored; window always centers | `internal/core/webview_darwin.go` | 🔴 Open | `createWindow` unconditionally calls `[window center]` |
+| D07 | 🟢 | `Center` option ignored; window always centers | `internal/core/webview_darwin.go` | ✅ Fixed | `createWindow` centers only when `opts.Center` is true |
 | D09 | 🔴 | Main goroutine not pinned to main thread before `main()` | `internal/core/webview_darwin.go` | ✅ Fixed | `runtime.LockOSThread()` moved from `newNative` to `init()`. AppKit requires thread 0 for `NSApp run`. |
 | D10 | 🔴 | Cookie sync deadlocks main thread before `Run()` | `internal/core/cookie_sync_darwin.go` | ✅ Fixed | `waitForCookieStore()` pumps `NSRunLoop` when on main thread; `dispatch_semaphore_wait` alone blocks the completion handler from running. |
 | D08 | 🟢 | Dialog file filters ignored | `internal/core/dialog_darwin.go` | ✅ Fixed | `setAllowedFileTypes` wired for open/save dialogs on macOS |
 | D11 | 🔴 | Binding callback goroutines panic into void + use-after-free on Destroy | `internal/core/webview_darwin.go`, `webview_linux.go`, `webview_windows.go` | ✅ Fixed | Added `recover()` in goroutine; check `terminated` before `Eval` / `evalOnMainThread` |
 | D12 | 🟠 | Scheme response `Body` readers never closed | `internal/core/protocol_darwin.go` | ✅ Fixed | Close `resp.Body` via `io.Closer` after `io.ReadAll` |
 | D13 | 🔴 | Scheme task goroutines not coordinated with webview Destroy | `internal/core/protocol_darwin.go`, `webview_darwin.go` | ✅ Fixed | Check `terminated` before handler + delivery; `sync.WaitGroup` in `Destroy` with 5s timeout |
+| D14 | 🔴 | Custom schemes never wired to WKWebViewConfiguration | `internal/core/webview_darwin.go`, `protocol_darwin.go` | ✅ Fixed | Schemes from `Options.Schemes` registered in `createWebView`; late `RegisterScheme` returns actionable error |
+| D15 | 🔴 | Bridge callback id (`cb`) not validated — JS injection | `internal/core/webview.go`, platform handlers | ✅ Fixed | Shared `dispatchBridgeMessage` validates `__go_<alphanum>` ids; unknown bindings reject the promise |
 
 ### Linux (WebKitGTK)
 
@@ -38,9 +40,9 @@ Comprehensive inventory of all known gaps, stubs, TODOs, and technical debt in t
 |---|----------|-------------|---------|--------|-------|
 | L01 | 🔴 | JS bridge uses WKWebView API instead of WebKitGTK | `internal/core/webview_linux.go` | ✅ Fixed | Injected JS now uses `window.goBridge.postMessage` |
 | L02 | 🔴 | `Eval()` called from goroutine (GTK thread safety) | `internal/core/webview_linux.go` | ✅ Fixed | Responses now queued via `g_idle_add` to run on GTK main thread |
-| L03 | 🟠 | Custom protocols not implemented | `internal/core/webview_linux.go` | 🔴 Open | `RegisterScheme` returns `ErrNotImplemented` |
-| L04 | 🟠 | Dialogs not implemented | `internal/core/webview_linux.go` | 🔴 Open | Open/Save/Message dialogs return errors |
-| L05 | 🟠 | `SetMinSize`, `SetMaxSize`, `SetFullscreen`, `SetAlwaysOnTop` no-ops | `internal/core/webview_linux.go` | 🔴 Open | Methods exist but do nothing |
+| L03 | 🟠 | Custom protocols not implemented | `internal/core/protocol_linux.go` | ✅ Fixed | `webkit_web_context_register_uri_scheme` with async Go handler + response delivery |
+| L04 | 🟠 | Dialogs not implemented | `internal/core/dialog_linux.go` | ✅ Fixed | GTK file chooser + message dialog |
+| L05 | 🟠 | `SetMinSize`, `SetMaxSize`, `SetFullscreen`, `SetAlwaysOnTop` no-ops | `internal/core/webview_linux.go` | ✅ Fixed | GTK geometry hints, fullscreen, and keep-above |
 | L06 | 🟢 | Notifications no-op | `internal/core/webview_linux.go` | 🔴 Open | `Notify` returns `nil` with no action |
 
 ### Windows (WebView2)
@@ -88,7 +90,7 @@ Comprehensive inventory of all known gaps, stubs, TODOs, and technical debt in t
 | T02 | 🟡 | `internal/types` at 0.0% | `internal/types/*` | ✅ Fixed | Added tests for constants, structs, DefaultOptions |
 | T03 | 🟡 | `pkg/webview/compat` at 0.0% | `pkg/webview/compat/*` | 🟡 Partial | Only compile-time alias check |
 | T04 | 🟡 | JS bridge missing edge-case tests | `internal/js/bridge_test.go` | ✅ Fixed | Added tests for slice args, map args, pointer returns, error wrapping, multi-return validation |
-| T05 | 🟡 | No cross-platform integration tests | — | 🔴 Open | Each example is manual-only |
+| T05 | 🟡 | No cross-platform integration tests | `internal/core/bridge_integration_test.go` | ✅ Fixed | `//go:build integration` tests for headless bind round-trip and `Options.Schemes` |
 | T06 | 🟡 | Dialog success paths untested | `pkg/webview/webview_test.go` | 🔴 Open | Only error paths tested (headless returns errors) |
 
 ---
@@ -103,3 +105,6 @@ Comprehensive inventory of all known gaps, stubs, TODOs, and technical debt in t
 | D11 | Binding callback panic recovery + post-Destroy guard | `internal/core/webview_darwin.go`, `webview_linux.go`, `webview_windows.go` | v0.2 | Goroutines could panic silently or call `Eval` on freed native objects after `Destroy`. Added `recover()` and `terminated` check. |
 | D12 | Scheme response Body close leak | `internal/core/protocol_darwin.go` | v0.2 | `FSHandler` and `HTTPHandler` returned live readers that were never closed after `io.ReadAll`. |
 | D13 | Scheme task lifetime coordination with Destroy | `internal/core/protocol_darwin.go`, `webview_darwin.go` | v0.2 | Pending scheme goroutines could outlive the WKWebView. Added `terminated` guards and `sync.WaitGroup` drain in `Destroy`. |
+| D14 | macOS scheme registration wired at webview creation | `internal/core/webview_darwin.go`, `internal/types/types.go` | v0.3 | `Options.Schemes` pre-registers handlers on `WKWebViewConfiguration`; late `RegisterScheme` returns clear error. |
+| D15 | Bridge callback id validation + unknown binding reject | `internal/core/bridge.go` | v0.3 | Prevents JS injection via crafted `cb` field; rejects unknown bindings instead of hanging promises. |
+| L03–L05 | Linux custom schemes, dialogs, window chrome | `internal/core/protocol_linux.go`, `dialog_linux.go`, `webview_linux.go` | v0.3 | WebKitGTK URI schemes, GTK dialogs, geometry/fullscreen/keep-above. |

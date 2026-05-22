@@ -65,11 +65,27 @@ static void *createWindow(int width, int height, int styleMask, const char *titl
     return window;
 }
 
-static void *createWebView(void *windowPtr, uintptr_t handle, int enableDevTools) {
+#include "protocol_darwin_delegate.h"
+
+static void registerURLScheme(WKWebViewConfiguration *config, const char *scheme, uintptr_t handle) {
+    SchemeHandlerDelegate *delegate = [[SchemeHandlerDelegate alloc] init];
+    delegate.handle = handle;
+    delegate.scheme = [NSString stringWithUTF8String:scheme];
+    [config setURLSchemeHandler:delegate forURLScheme:[NSString stringWithUTF8String:scheme]];
+}
+
+static void *createWebView(void *windowPtr, uintptr_t handle, int enableDevTools,
+                           const char **schemes, int schemeCount) {
     NSWindow *window = (NSWindow *)windowPtr;
     WKWebViewConfiguration *config = [[WKWebViewConfiguration alloc] init];
     if (enableDevTools) {
         [config.preferences setValue:@YES forKey:@"developerExtrasEnabled"];
+    }
+
+    for (int i = 0; i < schemeCount; i++) {
+        if (schemes[i] && schemes[i][0]) {
+            registerURLScheme(config, schemes[i], handle);
+        }
     }
 
     WKUserContentController *controller = config.userContentController;
@@ -322,7 +338,18 @@ func newNative(opts types.Options) (Platform, error) {
 	wv.window = unsafe.Pointer(window)
 	wv.pump = newResponsePump(wv.evalAsync)
 
-	webView := C.createWebView(window, C.uintptr_t(wv.handle), boolInt(opts.Devtools))
+	for scheme, handler := range opts.Schemes {
+		wv.schemes[scheme] = handler
+	}
+	schemeNames, freeSchemes := schemeNamesToC(wv.schemes)
+	defer freeSchemes()
+	var schemeArr **C.char
+	if len(schemeNames) > 0 {
+		schemeArr = &schemeNames[0]
+	}
+
+	webView := C.createWebView(window, C.uintptr_t(wv.handle), boolInt(opts.Devtools),
+		schemeArr, C.int(len(schemeNames)))
 	if webView == nil {
 		return nil, fmt.Errorf("core: failed to create webview")
 	}
@@ -566,44 +593,19 @@ func goWebViewMessageReceived(handle C.uintptr_t, name *C.char, body *C.char) {
 	b := C.GoString(body)
 
 	if n == "goBridge" {
-		var msg struct {
-			Bind string          `json:"bind"`
-			Args json.RawMessage `json:"args"`
-			CB   string          `json:"cb"`
-		}
-		if err := json.Unmarshal([]byte(b), &msg); err != nil {
-			dw.logger.Error("failed to unmarshal bridge message", "error", err)
-			return
-		}
-
-		// Prefer the raw (high-perf) binding, then fall back to the normal
-		// reflection-based one.
-		dw.mu.RLock()
-		rawFn := dw.rawBindings[msg.Bind]
-		normalFn := dw.bindings[msg.Bind]
-		dw.mu.RUnlock()
-
-		if rawFn == nil && normalFn == nil {
-			dw.logger.Warn("unknown binding", "name", msg.Bind)
-			return
-		}
-
-		go func() {
-			defer func() {
-				if r := recover(); r != nil {
-					dw.logger.Error("binding callback panic", "name", msg.Bind, "recover", r)
-				}
-			}()
-
-			script := bindResponseScript(msg.CB, msg.Args, rawFn, normalFn)
-			if dw.isTerminated() {
-				return
-			}
-			// Hop to the main thread via the batching pump (WKWebView eval is
-			// main-thread only; batching amortizes the cgo/dispatch cost).
-			dw.pump.enqueue(script)
-		}()
+		parseBridgeMessage(newPlatformBridgeHost(
+			dw.lookupBinding,
+			dw.isTerminated,
+			dw.pump.enqueue,
+			dw.logger,
+		), b)
 	}
+}
+
+func (w *darwinWebView) lookupBinding(name string) bridgeBindings {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	return bridgeBindings{w.rawBindings[name], w.bindings[name]}
 }
 
 //export goWebViewWindowWillClose

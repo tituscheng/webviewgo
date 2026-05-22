@@ -3,6 +3,7 @@ package webview
 import (
 	"context"
 	"encoding/json"
+	"net/http"
 	"testing"
 	"time"
 )
@@ -132,6 +133,22 @@ func TestWebView_Bind(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("Bind: %v", err)
 	}
+}
+
+func TestNew_WithSchemes(t *testing.T) {
+	wv, err := New(Options{
+		Headless: true,
+		AppName:  "webviewgo-test-schemes",
+		Schemes: map[string]SchemeHandler{
+			"app": func(req *Request) *Response {
+				return &Response{StatusCode: http.StatusOK}
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer wv.Destroy()
 }
 
 func TestBind_BindRaw_Collision(t *testing.T) {

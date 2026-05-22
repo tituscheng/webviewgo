@@ -94,6 +94,32 @@ static void windowHide(GtkWindow *window) {
     gtk_widget_hide(GTK_WIDGET(window));
 }
 
+static void windowSetMinSize(GtkWindow *window, int minW, int minH) {
+    GdkGeometry geometry = {0};
+    geometry.min_width = minW;
+    geometry.min_height = minH;
+    gtk_window_set_geometry_hints(window, NULL, &geometry, GDK_HINT_MIN_SIZE);
+}
+
+static void windowSetMaxSize(GtkWindow *window, int maxW, int maxH) {
+    GdkGeometry geometry = {0};
+    geometry.max_width = maxW;
+    geometry.max_height = maxH;
+    gtk_window_set_geometry_hints(window, NULL, &geometry, GDK_HINT_MAX_SIZE);
+}
+
+static void windowSetFullscreen(GtkWindow *window, int on) {
+    if (on) {
+        gtk_window_fullscreen(window);
+    } else {
+        gtk_window_unfullscreen(window);
+    }
+}
+
+static void windowSetAlwaysOnTop(GtkWindow *window, int on) {
+    gtk_window_set_keep_above(window, on ? TRUE : FALSE);
+}
+
 static void runGtk() {
     gtk_main();
 }
@@ -154,6 +180,7 @@ import (
 	"log/slog"
 	"runtime"
 	"sync"
+	"time"
 	"unsafe"
 
 	"github.com/tituscheng/webviewgo/internal/types"
@@ -173,6 +200,7 @@ type linuxWebView struct {
 	ctx         context.Context
 	cancel      context.CancelFunc
 	terminated  bool
+	pending     sync.WaitGroup
 	pump        *responsePump // batches Bind/BindRaw responses onto the GTK main thread
 }
 
@@ -201,6 +229,9 @@ func newNative(opts types.Options) (Platform, error) {
 		schemes:     make(map[string]types.SchemeHandler),
 		done:        make(chan struct{}),
 	}
+	for scheme, handler := range opts.Schemes {
+		wv.schemes[scheme] = handler
+	}
 	wv.ctx, wv.cancel = context.WithCancel(context.Background())
 	wv.handle = nextHandle(wv)
 	wv.window = unsafe.Pointer(window)
@@ -213,6 +244,7 @@ func newNative(opts types.Options) (Platform, error) {
 		return nil, fmt.Errorf("core: failed to create webview")
 	}
 	wv.webView = unsafe.Pointer(webView)
+	linuxRegisterSchemes(wv)
 
 	gtkWindow := (*C.GtkWindow)(window)
 	C.gtk_container_add((*C.GtkContainer)(unsafe.Pointer(gtkWindow)), (*C.GtkWidget)(webView))
@@ -266,6 +298,16 @@ func (w *linuxWebView) Destroy() error {
 	case <-w.done:
 	case <-w.ctx.Done():
 	}
+	done := make(chan struct{})
+	go func() {
+		w.pending.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		w.logger.Warn("destroy timed out waiting for pending scheme tasks")
+	}
 	releaseHandle(w.handle)
 	return nil
 }
@@ -289,11 +331,20 @@ func (w *linuxWebView) SetSize(width, height int, hint types.Hint) {
 	C.windowSetSize((*C.GtkWindow)(w.window), C.int(width), C.int(height))
 }
 
-func (w *linuxWebView) SetMinSize(width, height int) {}
-func (w *linuxWebView) SetMaxSize(width, height int) {}
-func (w *linuxWebView) SetFullscreen(bool)           {}
-func (w *linuxWebView) SetAlwaysOnTop(bool)          {}
-func (w *linuxWebView) Show()                        { C.windowShow((*C.GtkWindow)(w.window)) }
+func (w *linuxWebView) SetMinSize(width, height int) {
+	C.windowSetMinSize((*C.GtkWindow)(w.window), C.int(width), C.int(height))
+}
+
+func (w *linuxWebView) SetMaxSize(width, height int) {
+	C.windowSetMaxSize((*C.GtkWindow)(w.window), C.int(width), C.int(height))
+}
+func (w *linuxWebView) SetFullscreen(fullscreen bool) {
+	C.windowSetFullscreen((*C.GtkWindow)(w.window), boolInt(fullscreen))
+}
+func (w *linuxWebView) SetAlwaysOnTop(alwaysOnTop bool) {
+	C.windowSetAlwaysOnTop((*C.GtkWindow)(w.window), boolInt(alwaysOnTop))
+}
+func (w *linuxWebView) Show() { C.windowShow((*C.GtkWindow)(w.window)) }
 func (w *linuxWebView) Hide()                        { C.windowHide((*C.GtkWindow)(w.window)) }
 
 func (w *linuxWebView) Navigate(url string) error {
@@ -371,22 +422,6 @@ func (w *linuxWebView) installBindingLocked(name string) {
 	_ = w.Eval(script)
 }
 
-func (w *linuxWebView) RegisterScheme(scheme string, handler types.SchemeHandler) error {
-	return fmt.Errorf("core: RegisterScheme not yet implemented on linux")
-}
-
-func (w *linuxWebView) OpenDialog(opts types.OpenDialogOptions) ([]string, error) {
-	return nil, fmt.Errorf("core: OpenDialog not yet implemented on linux")
-}
-
-func (w *linuxWebView) SaveDialog(opts types.SaveDialogOptions) (string, error) {
-	return "", fmt.Errorf("core: SaveDialog not yet implemented on linux")
-}
-
-func (w *linuxWebView) MessageDialog(opts types.MessageDialogOptions) (types.DialogResult, error) {
-	return types.DialogCancel, fmt.Errorf("core: MessageDialog not yet implemented on linux")
-}
-
 func (w *linuxWebView) ClipboardReadText() (string, error) {
 	cs := C.clipboardReadText()
 	if cs == nil {
@@ -418,41 +453,19 @@ func goWebViewMessageReceived(handle C.uintptr_t, name *C.char, body *C.char) {
 	b := C.GoString(body)
 
 	if n == "goBridge" {
-		var msg struct {
-			Bind string          `json:"bind"`
-			Args json.RawMessage `json:"args"`
-			CB   string          `json:"cb"`
-		}
-		if err := json.Unmarshal([]byte(b), &msg); err != nil {
-			lw.logger.Error("failed to unmarshal bridge message", "error", err)
-			return
-		}
-
-		// Prefer the raw (high-perf) binding, then fall back to the normal one.
-		lw.mu.RLock()
-		rawFn := lw.rawBindings[msg.Bind]
-		normalFn := lw.bindings[msg.Bind]
-		lw.mu.RUnlock()
-
-		if rawFn == nil && normalFn == nil {
-			lw.logger.Warn("unknown binding", "name", msg.Bind)
-			return
-		}
-
-		go func() {
-			defer func() {
-				if r := recover(); r != nil {
-					lw.logger.Error("binding callback panic", "name", msg.Bind, "recover", r)
-				}
-			}()
-
-			script := bindResponseScript(msg.CB, msg.Args, rawFn, normalFn)
-			if lw.isTerminated() {
-				return
-			}
-			lw.pump.enqueue(script)
-		}()
+		parseBridgeMessage(newPlatformBridgeHost(
+			lw.lookupBinding,
+			lw.isTerminated,
+			lw.pump.enqueue,
+			lw.logger,
+		), b)
 	}
+}
+
+func (w *linuxWebView) lookupBinding(name string) bridgeBindings {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	return bridgeBindings{w.rawBindings[name], w.bindings[name]}
 }
 
 //export goWebViewWindowWillClose
