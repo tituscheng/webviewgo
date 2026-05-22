@@ -220,6 +220,7 @@ import (
 	"log/slog"
 	"runtime"
 	"sync"
+	"time"
 	"unsafe"
 
 	"github.com/tituscheng/webviewgo/internal/types"
@@ -238,6 +239,7 @@ type darwinWebView struct {
 	ctx        context.Context
 	cancel     context.CancelFunc
 	terminated bool
+	pending    sync.WaitGroup
 }
 
 // init pins the main goroutine to the main OS thread. On macOS, AppKit
@@ -327,6 +329,17 @@ func (w *darwinWebView) Destroy() error {
 	case <-w.done:
 	case <-w.ctx.Done():
 	}
+	// Drain any in-flight scheme tasks with a timeout to avoid hanging.
+	done := make(chan struct{})
+	go func() {
+		w.pending.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		w.logger.Warn("destroy timed out waiting for pending scheme tasks")
+	}
 	releaseHandle(w.handle)
 	C.deactivateApp()
 	return nil
@@ -407,11 +420,11 @@ func (w *darwinWebView) Forward() {
 	C.webViewGoForward(w.webView)
 }
 
-func (w *darwinWebView) Eval(script string) (any, error) {
+func (w *darwinWebView) Eval(script string) error {
 	cs := C.CString(script)
 	defer C.free(unsafe.Pointer(cs))
 	C.webViewEval(w.webView, cs, C.uintptr_t(w.handle))
-	return nil, nil
+	return nil
 }
 
 func (w *darwinWebView) Bind(name string, fn func(args []any) (any, error)) error {
@@ -432,7 +445,7 @@ func (w *darwinWebView) Bind(name string, fn func(args []any) (any, error)) erro
 		});
 	};
 `, name, name)
-	_, _ = w.Eval(script)
+	_ = w.Eval(script)
 	return nil
 }
 
@@ -489,6 +502,11 @@ func goWebViewMessageReceived(handle C.uintptr_t, name *C.char, body *C.char) {
 			return
 		}
 		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					dw.logger.Error("binding callback panic", "name", msg.Bind, "recover", r)
+				}
+			}()
 			res, err := fn(msg.Args)
 			var script string
 			if err != nil {
@@ -498,7 +516,13 @@ func goWebViewMessageReceived(handle C.uintptr_t, name *C.char, body *C.char) {
 				rs, _ := json.Marshal(res)
 				script = fmt.Sprintf("window['%s'].resolve(%s); delete window['%s'];", msg.CB, rs, msg.CB)
 			}
-			_, _ = dw.Eval(script)
+			dw.mu.RLock()
+			term := dw.terminated
+			dw.mu.RUnlock()
+			if term {
+				return
+			}
+			_ = dw.Eval(script)
 		}()
 	}
 }

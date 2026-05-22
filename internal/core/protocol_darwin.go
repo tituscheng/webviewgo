@@ -85,7 +85,9 @@ func goProtocolHandler(handle C.uintptr_t, scheme *C.char, url *C.char, method *
 		return
 	}
 
+	dw.pending.Add(1)
 	go func() {
+		defer dw.pending.Done()
 		defer func() {
 			if r := recover(); r != nil {
 				// Ensure the scheme task is always completed, even on panic.
@@ -96,6 +98,18 @@ func goProtocolHandler(handle C.uintptr_t, scheme *C.char, url *C.char, method *
 				C.free(unsafe.Pointer(msg))
 			}
 		}()
+
+		dw.mu.RLock()
+		term := dw.terminated
+		dw.mu.RUnlock()
+		if term {
+			cct := C.CString("text/plain")
+			msg := C.CString("Service Unavailable")
+			C.deliverSchemeResponse(C.uintptr_t(reqHandle), C.int(http.StatusServiceUnavailable), cct, unsafe.Pointer(msg), C.int(len("Service Unavailable")))
+			C.free(unsafe.Pointer(cct))
+			C.free(unsafe.Pointer(msg))
+			return
+		}
 
 		resp := handler(&types.Request{
 			Method: m,
@@ -110,10 +124,20 @@ func goProtocolHandler(handle C.uintptr_t, scheme *C.char, url *C.char, method *
 		if resp.Body != nil {
 			var err error
 			respBody, err = io.ReadAll(io.LimitReader(resp.Body, maxSchemeResponseBody))
+			if c, ok := resp.Body.(io.Closer); ok {
+				c.Close()
+			}
 			if err != nil {
 				resp.StatusCode = http.StatusInternalServerError
 				respBody = nil
 			}
+		}
+
+		dw.mu.RLock()
+		term = dw.terminated
+		dw.mu.RUnlock()
+		if term {
+			return
 		}
 
 		ct := resp.Headers.Get("Content-Type")

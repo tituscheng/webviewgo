@@ -94,11 +94,11 @@ func (w *headlessWebView) Reload()  {}
 func (w *headlessWebView) Back()    {}
 func (w *headlessWebView) Forward() {}
 
-func (w *headlessWebView) Eval(script string) (any, error) {
+func (w *headlessWebView) Eval(script string) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	w.evals = append(w.evals, script)
-	return nil, nil
+	return nil
 }
 
 func (w *headlessWebView) Bind(name string, fn func(args []any) (any, error)) error {

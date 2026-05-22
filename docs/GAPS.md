@@ -28,6 +28,9 @@ Comprehensive inventory of all known gaps, stubs, TODOs, and technical debt in t
 | D09 | 🔴 | Main goroutine not pinned to main thread before `main()` | `internal/core/webview_darwin.go` | ✅ Fixed | `runtime.LockOSThread()` moved from `newNative` to `init()`. AppKit requires thread 0 for `NSApp run`. |
 | D10 | 🔴 | Cookie sync deadlocks main thread before `Run()` | `internal/core/cookie_sync_darwin.go` | ✅ Fixed | `waitForCookieStore()` pumps `NSRunLoop` when on main thread; `dispatch_semaphore_wait` alone blocks the completion handler from running. |
 | D08 | 🟢 | Dialog file filters ignored | `internal/core/dialog_darwin.go` | ✅ Fixed | `setAllowedFileTypes` wired for open/save dialogs on macOS |
+| D11 | 🔴 | Binding callback goroutines panic into void + use-after-free on Destroy | `internal/core/webview_darwin.go`, `webview_linux.go`, `webview_windows.go` | ✅ Fixed | Added `recover()` in goroutine; check `terminated` before `Eval` / `evalOnMainThread` |
+| D12 | 🟠 | Scheme response `Body` readers never closed | `internal/core/protocol_darwin.go` | ✅ Fixed | Close `resp.Body` via `io.Closer` after `io.ReadAll` |
+| D13 | 🔴 | Scheme task goroutines not coordinated with webview Destroy | `internal/core/protocol_darwin.go`, `webview_darwin.go` | ✅ Fixed | Check `terminated` before handler + delivery; `sync.WaitGroup` in `Destroy` with 5s timeout |
 
 ### Linux (WebKitGTK)
 
@@ -73,6 +76,7 @@ Comprehensive inventory of all known gaps, stubs, TODOs, and technical debt in t
 | A05 | 🟠 | Drag & Drop option exists but unwired | `internal/types/types.go` | 🔴 Open | `OnDrop` in `Options` never read |
 | A06 | 🟠 | Proxy option exists but unwired | `internal/types/types.go` | 🔴 Open | `Proxy` in `Options` never passed to backends |
 | A07 | 🟢 | Compat layer `New()` panics on error | `pkg/webview/compat/compat.go` | 🔴 Open | Matches old API but poor practice |
+| A08 | 🔴 | `Eval()` signature promises `(any, error)` but always returns `(nil, nil)` on all platforms | `pkg/webview/webview.go`, `internal/core/webview*.go` | ✅ Fixed | Changed signature to `Eval(script string) error` to match actual behavior and original webview_go contract |
 
 ---
 
@@ -95,3 +99,7 @@ Comprehensive inventory of all known gaps, stubs, TODOs, and technical debt in t
 |---|-------------|---------|----------|-----------|
 | D09 | Main goroutine pinning (`LockOSThread` in `init()`) | `internal/core/webview_darwin.go`, `webview_linux.go`, `webview_windows.go` | v0.1 | Prevents AppKit/GTK COM init from happening on a goroutine-scheduled thread instead of thread 0. |
 | D10 | Cookie sync main-thread deadlock (`waitForCookieStore`) | `internal/core/cookie_sync_darwin.go` | v0.1 | `WKHTTPCookieStore` completion handlers run on main thread; `dispatch_semaphore_wait` without run-loop pumping deadlocks if called before `[NSApp run]`. |
+| A08 | `Eval()` API contract fix: `(any, error)` → `error` | `pkg/webview/webview.go`, `internal/core/*` | v0.2 | All backends discarded eval results; signature falsely promised return values. Reverted to `error`-only to match original library contract. |
+| D11 | Binding callback panic recovery + post-Destroy guard | `internal/core/webview_darwin.go`, `webview_linux.go`, `webview_windows.go` | v0.2 | Goroutines could panic silently or call `Eval` on freed native objects after `Destroy`. Added `recover()` and `terminated` check. |
+| D12 | Scheme response Body close leak | `internal/core/protocol_darwin.go` | v0.2 | `FSHandler` and `HTTPHandler` returned live readers that were never closed after `io.ReadAll`. |
+| D13 | Scheme task lifetime coordination with Destroy | `internal/core/protocol_darwin.go`, `webview_darwin.go` | v0.2 | Pending scheme goroutines could outlive the WKWebView. Added `terminated` guards and `sync.WaitGroup` drain in `Destroy`. |

@@ -37,7 +37,7 @@ type WebView interface {
 	Back()
 	Forward()
 
-	Eval(script string) (any, error)
+	Eval(script string) error
 	Bind(name string, fn any) error
 
 	CookieManager() CookieManager
@@ -173,14 +173,14 @@ func (w *webview) injectUserAgent() {
 	}
 	w.uaInjected = true
 	script := fmt.Sprintf(`navigator.__defineGetter__('userAgent', function(){ return %q; });`, w.userAgent)
-	if _, err := w.platform.Eval(script); err != nil {
+	if err := w.platform.Eval(script); err != nil {
 		w.logger.Warn("user-agent fallback injection failed", "error", err)
 	}
 }
 func (w *webview) Reload()                              { w.platform.Reload() }
 func (w *webview) Back()                                { w.platform.Back() }
 func (w *webview) Forward()                             { w.platform.Forward() }
-func (w *webview) Eval(script string) (any, error)      { return w.platform.Eval(script) }
+func (w *webview) Eval(script string) error             { return w.platform.Eval(script) }
 
 func (w *webview) Bind(name string, fn any) error {
 	bridge, err := js.Wrap(fn)

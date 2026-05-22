@@ -281,11 +281,11 @@ func (w *linuxWebView) Reload()  { C.webViewReload((*C.WebKitWebView)(w.webView)
 func (w *linuxWebView) Back()    { C.webViewGoBack((*C.WebKitWebView)(w.webView)) }
 func (w *linuxWebView) Forward() { C.webViewGoForward((*C.WebKitWebView)(w.webView)) }
 
-func (w *linuxWebView) Eval(script string) (any, error) {
+func (w *linuxWebView) Eval(script string) error {
 	cs := C.CString(script)
 	defer C.free(unsafe.Pointer(cs))
 	C.webViewEval((*C.WebKitWebView)(w.webView), cs)
-	return nil, nil
+	return nil
 }
 
 func (w *linuxWebView) Bind(name string, fn func(args []any) (any, error)) error {
@@ -305,7 +305,7 @@ func (w *linuxWebView) Bind(name string, fn func(args []any) (any, error)) error
 		});
 	};
 `, name, name)
-	_, _ = w.Eval(script)
+	_ = w.Eval(script)
 	return nil
 }
 
@@ -373,6 +373,11 @@ func goWebViewMessageReceived(handle C.uintptr_t, name *C.char, body *C.char) {
 			return
 		}
 		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					lw.logger.Error("binding callback panic", "name", msg.Bind, "recover", r)
+				}
+			}()
 			res, err := fn(msg.Args)
 			var script string
 			if err != nil {
@@ -381,6 +386,12 @@ func goWebViewMessageReceived(handle C.uintptr_t, name *C.char, body *C.char) {
 			} else {
 				rs, _ := json.Marshal(res)
 				script = fmt.Sprintf("window['%s'].resolve(%s); delete window['%s'];", msg.CB, rs, msg.CB)
+			}
+			lw.mu.RLock()
+			term := lw.terminated
+			lw.mu.RUnlock()
+			if term {
+				return
 			}
 			cs := C.CString(script)
 			C.evalOnMainThread((*C.WebKitWebView)(lw.webView), cs)

@@ -67,7 +67,7 @@ func TestWebView_HeadlessLifecycle(t *testing.T) {
 	wv.Back()
 	wv.Forward()
 
-	if _, err := wv.Eval("1+1"); err != nil {
+	if err := wv.Eval("1+1"); err != nil {
 		t.Fatalf("Eval: %v", err)
 	}
 

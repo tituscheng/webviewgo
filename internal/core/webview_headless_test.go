@@ -35,7 +35,7 @@ func TestHeadlessLifecycle(t *testing.T) {
 	w.Back()
 	w.Forward()
 
-	if _, err := w.Eval("1"); err != nil {
+	if err := w.Eval("1"); err != nil {
 		t.Fatalf("Eval: %v", err)
 	}
 

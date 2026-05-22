@@ -79,14 +79,14 @@ func Bind(w WebView, name string, fn any) error {
 
 // Eval evaluates JavaScript in the webview. Panics on error.
 func Eval(w WebView, script string) {
-	if _, err := w.Eval(script); err != nil {
+	if err := w.Eval(script); err != nil {
 		panic(fmt.Sprintf("compat: Eval failed: %v", err))
 	}
 }
 
 // Init injects JavaScript before page load (best-effort via eval). Panics on error.
 func Init(w WebView, js string) {
-	if _, err := w.Eval(js); err != nil {
+	if err := w.Eval(js); err != nil {
 		panic(fmt.Sprintf("compat: Init failed: %v", err))
 	}
 }

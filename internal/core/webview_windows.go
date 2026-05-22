@@ -188,11 +188,11 @@ func (w *windowsWebView) Reload()  { C.wvReload() }
 func (w *windowsWebView) Back()    { C.wvGoBack() }
 func (w *windowsWebView) Forward() { C.wvGoForward() }
 
-func (w *windowsWebView) Eval(script string) (any, error) {
+func (w *windowsWebView) Eval(script string) error {
 	cs := C.CString(script)
 	defer C.free(unsafe.Pointer(cs))
 	C.wvEval(cs)
-	return nil, nil
+	return nil
 }
 
 func (w *windowsWebView) Bind(name string, fn func(args []any) (any, error)) error {
@@ -223,7 +223,7 @@ window.%s = function(...args) {
 	});
 };
 `, name, name)
-	_, _ = w.Eval(script)
+	_ = w.Eval(script)
 	return nil
 }
 
@@ -357,6 +357,11 @@ func goWebViewMessageReceived(handle C.uintptr_t, name *C.char, body *C.char) {
 			return
 		}
 		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					ww.logger.Error("binding callback panic", "name", msg.Bind, "recover", r)
+				}
+			}()
 			res, err := fn(msg.Args)
 			var script string
 			if err != nil {
@@ -366,7 +371,13 @@ func goWebViewMessageReceived(handle C.uintptr_t, name *C.char, body *C.char) {
 				rs, _ := json.Marshal(res)
 				script = fmt.Sprintf("window['%s'].resolve(%s); delete window['%s'];", msg.CB, rs, msg.CB)
 			}
-			_, _ = ww.Eval(script)
+			ww.mu.RLock()
+			term := ww.terminated
+			ww.mu.RUnlock()
+			if term {
+				return
+			}
+			_ = ww.Eval(script)
 		}()
 	}
 }

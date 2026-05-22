@@ -30,7 +30,7 @@ type Platform interface {
 	Back()
 	Forward()
 
-	Eval(script string) (any, error)
+	Eval(script string) error
 	Bind(name string, fn func(args []any) (any, error)) error
 
 	RegisterScheme(scheme string, handler types.SchemeHandler) error
