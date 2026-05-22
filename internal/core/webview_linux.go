@@ -34,6 +34,7 @@ static WebKitWebView *createWebView(uintptr_t handle, int enableDevTools, const 
     if (enableDevTools) {
         webkit_settings_set_enable_developer_extras(settings, TRUE);
     }
+    webkit_settings_set_javascript_can_access_clipboard(settings, TRUE);
     if (userAgent && userAgent[0]) {
         webkit_settings_set_user_agent(settings, userAgent);
     }

@@ -81,6 +81,8 @@ static void *createWebView(void *windowPtr, uintptr_t handle, int enableDevTools
     if (enableDevTools) {
         [config.preferences setValue:@YES forKey:@"developerExtrasEnabled"];
     }
+    [config.preferences setValue:@YES forKey:@"javaScriptCanAccessClipboard"];
+    [config.preferences setValue:@YES forKey:@"DOMPasteAllowed"];
 
     for (int i = 0; i < schemeCount; i++) {
         if (schemes[i] && schemes[i][0]) {

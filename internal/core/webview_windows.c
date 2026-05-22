@@ -45,6 +45,7 @@ struct IUnknown {
 #define WV2_RELOAD 31
 #define WV2_POST_WEB_MESSAGE_AS_JSON 33
 #define WV2_ADD_WEB_MESSAGE_RECEIVED 34
+#define WV2_ADD_PERMISSION_REQUESTED 23
 #define WV2_GO_BACK 40
 #define WV2_GO_FORWARD 41
 
@@ -242,6 +243,33 @@ static HRESULT STDMETHODCALLTYPE envHandler_Invoke(IUnknown *self, HRESULT error
 
             EventRegistrationToken token;
             wv2_add_web_message_received(wv, (IUnknown *)&msgHandler, &token);
+
+            // Add permission requested handler to allow JS clipboard access
+            static ICompletedHandlerVtbl2 permVtbl = {
+                { handler2_QueryInterface, handler2_AddRef, handler2_Release },
+                NULL
+            };
+            static ICompletedHandler2 permHandler = { &permVtbl, 1 };
+
+            HRESULT STDMETHODCALLTYPE permHandler_Invoke(IUnknown *s, ICoreWebView2 *sender, ICoreWebView2PermissionRequestedEventArgs *args) {
+                (void)s; (void)sender;
+                if (!args) return S_OK;
+                // ICoreWebView2PermissionRequestedEventArgs:
+                // 3=get_PermissionKind, 6=put_State
+                typedef HRESULT (STDMETHODCALLTYPE *GetKindFn)(ICoreWebView2PermissionRequestedEventArgs *, int *);
+                typedef HRESULT (STDMETHODCALLTYPE *PutStateFn)(ICoreWebView2PermissionRequestedEventArgs *, int);
+                int kind = 0;
+                HRESULT hr = ((GetKindFn)((void ***)args)[0][3])(args, &kind);
+                if (SUCCEEDED(hr) && kind == 6) { // COREWEBVIEW2_PERMISSION_KIND_CLIPBOARD_READ
+                    ((PutStateFn)((void ***)args)[0][6])(args, 1); // COREWEBVIEW2_PERMISSION_STATE_ALLOW
+                }
+                return S_OK;
+            }
+            permVtbl.Invoke = permHandler_Invoke;
+
+            EventRegistrationToken permToken;
+            typedef HRESULT (STDMETHODCALLTYPE *AddPermFn)(ICoreWebView2 *, IUnknown *, EventRegistrationToken *);
+            ((AddPermFn)((void ***)wv)[0][WV2_ADD_PERMISSION_REQUESTED])(wv, (IUnknown *)&permHandler, &permToken);
         }
 
         SetEvent(g_initEvent);
