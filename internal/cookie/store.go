@@ -196,8 +196,20 @@ func scanCookies(rows *sql.Rows) ([]types.Cookie, error) {
 // domainMatch reports whether a cookie scoped to cookieDomain may be sent to
 // host. Host-only cookies require an exact host match; domain cookies also
 // match subdomains (RFC 6265 §5.1.3).
+//
+// A cookie with an empty domain never matches: it cannot be safely scoped, so
+// the conservative choice is to send it to no one. The jar always populates the
+// domain from the request host, so this only guards malformed cookies inserted
+// directly through the store.
+//
+// host and cookieDomain are compared as canonical hostnames. For IP-literal
+// hosts (IPv4 or bracket-stripped IPv6) only the exact-match branch can ever
+// fire, since the suffix rule requires a dotted parent domain.
 func domainMatch(host, cookieDomain string, hostOnly bool) bool {
 	cookieDomain = canonicalHost(cookieDomain)
+	if cookieDomain == "" {
+		return false
+	}
 	if host == cookieDomain {
 		return true
 	}

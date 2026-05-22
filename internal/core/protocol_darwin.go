@@ -153,12 +153,10 @@ func goProtocolHandler(handle C.uintptr_t, scheme *C.char, url *C.char, method *
 			}
 		}
 
-		dw.mu.RLock()
-		term = dw.terminated
-		dw.mu.RUnlock()
-		if term {
-			return
-		}
+		// Always deliver the handled response so the WKURLSchemeTask is
+		// completed. deliverSchemeResponse is self-guarding: if the webview was
+		// torn down (task already gone, or the main run loop stopped) it no-ops,
+		// and the response data is copied synchronously before dispatch.
 
 		// Forward all response headers (not just Content-Type), defaulting the
 		// content type when the handler did not set one.

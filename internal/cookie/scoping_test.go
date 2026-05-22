@@ -75,6 +75,17 @@ func TestStore_SecureScheme(t *testing.T) {
 	}
 }
 
+// A malformed cookie with an empty domain must never match a request, rather
+// than being broadcast everywhere.
+func TestDomainMatch_EmptyDomain(t *testing.T) {
+	if domainMatch("example.com", "", true) {
+		t.Error("host-only cookie with empty domain should not match")
+	}
+	if domainMatch("example.com", "", false) {
+		t.Error("domain cookie with empty domain should not match")
+	}
+}
+
 // A cookie set with a leading-dot Domain attribute is normalised and matches
 // both the apex and subdomains.
 func TestStore_LeadingDotDomain(t *testing.T) {

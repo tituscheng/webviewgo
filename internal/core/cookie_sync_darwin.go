@@ -38,14 +38,22 @@ static void runOnMain(void (^block)(void)) {
 
 static void syncCookie(void *webViewPtr, const char *name, const char *value,
                        const char *domain, const char *path, double expires,
-                       int secure, int httpOnly, int sameSite) {
+                       int secure, int httpOnly, int hostOnly, int sameSite) {
     WKWebView *webView = (WKWebView *)webViewPtr;
     WKHTTPCookieStore *store = webView.configuration.websiteDataStore.httpCookieStore;
 
     NSMutableDictionary *props = [NSMutableDictionary dictionary];
     props[NSHTTPCookieName] = [NSString stringWithUTF8String:name];
     props[NSHTTPCookieValue] = [NSString stringWithUTF8String:value];
-    props[NSHTTPCookieDomain] = [NSString stringWithUTF8String:domain];
+    // The store keeps domains in canonical (no leading dot) form. NSHTTPCookie
+    // uses the leading dot to distinguish scope: "example.com" is host-only
+    // (exact host) while ".example.com" also matches subdomains. Re-apply the
+    // dot for domain-wide cookies so native scoping matches the Go-side jar.
+    NSString *cookieDomain = [NSString stringWithUTF8String:domain];
+    if (!hostOnly && cookieDomain.length > 0 && ![cookieDomain hasPrefix:@"."]) {
+        cookieDomain = [@"." stringByAppendingString:cookieDomain];
+    }
+    props[NSHTTPCookieDomain] = cookieDomain;
     props[NSHTTPCookiePath] = [NSString stringWithUTF8String:path];
     if (expires > 0) {
         props[NSHTTPCookieExpires] = [NSDate dateWithTimeIntervalSince1970:expires];
@@ -127,7 +135,7 @@ func (w *darwinWebView) SyncCookiesToNative(cookies []types.Cookie) error {
 		if !c.Expires.IsZero() {
 			expires = C.double(c.Expires.Unix())
 		}
-		C.syncCookie(w.webView, name, value, domain, path, expires, boolInt(c.Secure), boolInt(c.HTTPOnly), C.int(c.SameSite))
+		C.syncCookie(w.webView, name, value, domain, path, expires, boolInt(c.Secure), boolInt(c.HTTPOnly), boolInt(c.HostOnly), C.int(c.SameSite))
 		C.free(unsafe.Pointer(name))
 		C.free(unsafe.Pointer(value))
 		C.free(unsafe.Pointer(domain))

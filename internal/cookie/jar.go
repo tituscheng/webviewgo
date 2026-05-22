@@ -124,7 +124,8 @@ func effectiveDomain(hostname, cookieDomain string) string {
 
 // canonicalHost normalises a host or cookie domain for comparison: lower-cased
 // with any trailing root dot and any leading "." (a Domain attribute prefix)
-// removed.
+// removed. IP-literal hosts (IPv4, or IPv6 already stripped of brackets by
+// url.Hostname) pass through unchanged and only ever compare by exact match.
 func canonicalHost(host string) string {
 	host = strings.TrimSuffix(host, ".")
 	host = strings.TrimPrefix(host, ".")
