@@ -19,12 +19,16 @@ type Profile struct {
 //  1. WEBVIEW_DATA_DIR environment variable
 //  2. explicit dataDir argument (if non-empty)
 //  3. platform-native default based on appName + profile
+//
+// When an explicit dir is provided (steps 1 or 2), it is used as-is.
+// Only the platform default (step 3) appends /profiles/<name>.
 func New(appName, profileName, dataDir string) (*Profile, error) {
 	if profileName == "" {
 		profileName = "default"
 	}
 
 	dir := os.Getenv("WEBVIEW_DATA_DIR")
+	explicit := true
 	if dir == "" {
 		dir = dataDir
 	}
@@ -33,9 +37,13 @@ func New(appName, profileName, dataDir string) (*Profile, error) {
 			return nil, fmt.Errorf("profile: either AppName or DataDir must be provided")
 		}
 		dir = defaultDataDir(appName)
+		explicit = false
 	}
 
-	dir = filepath.Join(dir, "profiles", profileName)
+	if !explicit {
+		dir = filepath.Join(dir, "profiles", profileName)
+	}
+
 	if err := os.MkdirAll(dir, 0o750); err != nil {
 		return nil, fmt.Errorf("profile: creating directory %s: %w", dir, err)
 	}

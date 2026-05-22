@@ -44,6 +44,8 @@ func (w *darwinWebView) RegisterScheme(scheme string, handler types.SchemeHandle
 	return nil
 }
 
+const maxSchemeResponseBody = 100 << 20 // 100 MiB
+
 //export goProtocolHandler
 func goProtocolHandler(handle C.uintptr_t, scheme *C.char, url *C.char, method *C.char,
 	body unsafe.Pointer, bodyLen C.int, reqHandle C.uintptr_t) {
@@ -58,6 +60,15 @@ func goProtocolHandler(handle C.uintptr_t, scheme *C.char, url *C.char, method *
 
 	var reqBody []byte
 	if body != nil && bodyLen > 0 {
+		if int(bodyLen) > maxSchemeResponseBody {
+			// Body too large — send 413 and clean up.
+			cct := C.CString("text/plain")
+			msg := C.CString("Request body too large")
+			C.deliverSchemeResponse(C.uintptr_t(reqHandle), C.int(http.StatusRequestEntityTooLarge), cct, unsafe.Pointer(msg), C.int(len("Request body too large")))
+			C.free(unsafe.Pointer(cct))
+			C.free(unsafe.Pointer(msg))
+			return
+		}
 		reqBody = C.GoBytes(body, bodyLen)
 	}
 
@@ -65,10 +76,27 @@ func goProtocolHandler(handle C.uintptr_t, scheme *C.char, url *C.char, method *
 	handler, ok := dw.schemes[s]
 	dw.mu.RUnlock()
 	if !ok {
+		// No handler registered — send 404 so the task is cleaned up.
+		cct := C.CString("text/plain")
+		msg := C.CString("Not Found")
+		C.deliverSchemeResponse(C.uintptr_t(reqHandle), C.int(http.StatusNotFound), cct, unsafe.Pointer(msg), C.int(len("Not Found")))
+		C.free(unsafe.Pointer(cct))
+		C.free(unsafe.Pointer(msg))
 		return
 	}
 
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				// Ensure the scheme task is always completed, even on panic.
+				cct := C.CString("text/plain")
+				msg := C.CString("Internal Server Error")
+				C.deliverSchemeResponse(C.uintptr_t(reqHandle), C.int(http.StatusInternalServerError), cct, unsafe.Pointer(msg), C.int(len("Internal Server Error")))
+				C.free(unsafe.Pointer(cct))
+				C.free(unsafe.Pointer(msg))
+			}
+		}()
+
 		resp := handler(&types.Request{
 			Method: m,
 			URL:    u,
@@ -80,7 +108,12 @@ func goProtocolHandler(handle C.uintptr_t, scheme *C.char, url *C.char, method *
 
 		var respBody []byte
 		if resp.Body != nil {
-			respBody, _ = io.ReadAll(resp.Body)
+			var err error
+			respBody, err = io.ReadAll(io.LimitReader(resp.Body, maxSchemeResponseBody))
+			if err != nil {
+				resp.StatusCode = http.StatusInternalServerError
+				respBody = nil
+			}
 		}
 
 		ct := resp.Headers.Get("Content-Type")

@@ -1,6 +1,7 @@
 package webview
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"io/fs"
@@ -13,6 +14,8 @@ import (
 
 	"github.com/tituscheng/webviewgo/internal/types"
 )
+
+const maxSchemeBodySize = 100 << 20 // 100 MiB
 
 // SchemeHandler handles requests for a custom URL scheme.
 type SchemeHandler = types.SchemeHandler
@@ -44,6 +47,10 @@ func FSHandler(fsys any, prefix string) SchemeHandler {
 		}
 
 		p := strings.TrimPrefix(u.Path, prefix)
+		p = path.Clean("/" + p)
+		if strings.Contains(p, "..") {
+			return &Response{StatusCode: http.StatusForbidden}
+		}
 		p = strings.TrimPrefix(p, "/")
 		if p == "" {
 			p = "index.html"
@@ -71,11 +78,6 @@ func FSHandler(fsys any, prefix string) SchemeHandler {
 			p = indexPath
 		}
 
-		body, err := io.ReadAll(f)
-		if err != nil {
-			return &Response{StatusCode: http.StatusInternalServerError}
-		}
-
 		ct := mime.TypeByExtension(path.Ext(p))
 		if ct == "" {
 			ct = "application/octet-stream"
@@ -84,7 +86,7 @@ func FSHandler(fsys any, prefix string) SchemeHandler {
 		return &Response{
 			StatusCode: http.StatusOK,
 			Headers:    http.Header{"Content-Type": {ct}},
-			Body:       io.NopCloser(strings.NewReader(string(body))),
+			Body:       f,
 		}
 	}
 }
@@ -97,11 +99,15 @@ func HTTPHandler(h http.Handler) SchemeHandler {
 			return &Response{StatusCode: http.StatusBadRequest}
 		}
 
-		httpReq := httptest.NewRequest(req.Method, u.String(), nil)
-		if req.Body != nil {
-			httpReq.Body = io.NopCloser(strings.NewReader(string(req.Body)))
-			httpReq.ContentLength = int64(len(req.Body))
+		var bodyReader io.Reader
+		if len(req.Body) > maxSchemeBodySize {
+			return &Response{StatusCode: http.StatusRequestEntityTooLarge}
 		}
+		if req.Body != nil {
+			bodyReader = bytes.NewReader(req.Body)
+		}
+		httpReq := httptest.NewRequest(req.Method, u.String(), bodyReader)
+		httpReq.ContentLength = int64(len(req.Body))
 		for k, v := range req.Headers {
 			httpReq.Header[k] = v
 		}
@@ -109,15 +115,11 @@ func HTTPHandler(h http.Handler) SchemeHandler {
 		rr := httptest.NewRecorder()
 		h.ServeHTTP(rr, httpReq)
 
-		var body []byte
-		if rr.Body != nil {
-			body = rr.Body.Bytes()
-		}
-
+		res := rr.Result()
 		return &Response{
 			StatusCode: rr.Code,
 			Headers:    rr.Header(),
-			Body:       io.NopCloser(strings.NewReader(string(body))),
+			Body:       res.Body,
 		}
 	}
 }
@@ -126,7 +128,7 @@ func HTTPHandler(h http.Handler) SchemeHandler {
 func NewResponse(status int, body []byte) *Response {
 	return &Response{
 		StatusCode: status,
-		Body:       io.NopCloser(strings.NewReader(string(body))),
+		Body:       io.NopCloser(bytes.NewReader(body)),
 	}
 }
 

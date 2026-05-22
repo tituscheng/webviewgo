@@ -54,12 +54,14 @@ type WebView interface {
 
 // webview is the concrete implementation of WebView.
 type webview struct {
-	platform core.Platform
-	cm       types.CookieManager
-	logger   *slog.Logger
-	mu       sync.RWMutex
-	ctx      context.Context
-	cancel   context.CancelFunc
+	platform        core.Platform
+	cm              types.CookieManager
+	logger          *slog.Logger
+	mu              sync.RWMutex
+	ctx             context.Context
+	cancel          context.CancelFunc
+	userAgent       string
+	uaInjected      bool
 }
 
 // New creates a WebView with the given options.
@@ -115,8 +117,10 @@ func NewWithContext(ctx context.Context, opts Options) (WebView, error) {
 		if setter, ok := p.(interface{ SetUserAgent(string) }); ok {
 			setter.SetUserAgent(opts.UserAgent)
 		} else {
-			// Fallback for platforms without native UA support (e.g. Windows)
-			_, _ = wv.Eval(fmt.Sprintf(`navigator.__defineGetter__('userAgent', function(){ return %q; });`, opts.UserAgent))
+			// Fallback for platforms without native UA support (e.g. Windows).
+			// Injected lazily on first Navigate/LoadHTML to avoid racing
+			// with document creation.
+			wv.userAgent = opts.UserAgent
 		}
 	}
 
@@ -153,8 +157,26 @@ func (w *webview) SetFullscreen(fullscreen bool)        { w.platform.SetFullscre
 func (w *webview) SetAlwaysOnTop(alwaysOnTop bool)      { w.platform.SetAlwaysOnTop(alwaysOnTop) }
 func (w *webview) Show()                                { w.platform.Show() }
 func (w *webview) Hide()                                { w.platform.Hide() }
-func (w *webview) Navigate(url string) error            { return w.platform.Navigate(url) }
-func (w *webview) LoadHTML(html, baseURL string) error  { return w.platform.LoadHTML(html, baseURL) }
+func (w *webview) Navigate(url string) error {
+	w.injectUserAgent()
+	return w.platform.Navigate(url)
+}
+
+func (w *webview) LoadHTML(html, baseURL string) error {
+	w.injectUserAgent()
+	return w.platform.LoadHTML(html, baseURL)
+}
+
+func (w *webview) injectUserAgent() {
+	if w.userAgent == "" || w.uaInjected {
+		return
+	}
+	w.uaInjected = true
+	script := fmt.Sprintf(`navigator.__defineGetter__('userAgent', function(){ return %q; });`, w.userAgent)
+	if _, err := w.platform.Eval(script); err != nil {
+		w.logger.Warn("user-agent fallback injection failed", "error", err)
+	}
+}
 func (w *webview) Reload()                              { w.platform.Reload() }
 func (w *webview) Back()                                { w.platform.Back() }
 func (w *webview) Forward()                             { w.platform.Forward() }

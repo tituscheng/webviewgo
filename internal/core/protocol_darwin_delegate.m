@@ -10,6 +10,7 @@ extern void goProtocolHandler(uintptr_t handle, char *scheme, char *url, char *m
 @end
 
 static NSMutableDictionary *schemeTaskMap = nil;
+static dispatch_queue_t schemeTaskQueue = nil;
 
 @implementation SchemeHandlerDelegate
 
@@ -22,6 +23,9 @@ static NSMutableDictionary *schemeTaskMap = nil;
     if (!schemeTaskMap) {
         schemeTaskMap = [NSMutableDictionary dictionary];
     }
+    if (!schemeTaskQueue) {
+        schemeTaskQueue = dispatch_queue_create("webviewgo.schemeTask", DISPATCH_QUEUE_SERIAL);
+    }
 
     NSURLRequest *req = urlSchemeTask.request;
     NSString *url = req.URL.absoluteString ?: @"";
@@ -31,7 +35,9 @@ static NSMutableDictionary *schemeTaskMap = nil;
     static uintptr_t reqSeq = 1;
     uintptr_t reqHandle = reqSeq++;
 
-    [schemeTaskMap setObject:urlSchemeTask forKey:@(reqHandle)];
+    dispatch_sync(schemeTaskQueue, ^{
+        [schemeTaskMap setObject:urlSchemeTask forKey:@(reqHandle)];
+    });
 
     goProtocolHandler(self.handle, (char *)[self.scheme UTF8String], (char *)[url UTF8String],
                       (char *)[method UTF8String], (void *)[bodyData bytes], (int)[bodyData length],
@@ -39,10 +45,13 @@ static NSMutableDictionary *schemeTaskMap = nil;
 }
 
 - (void)webView:(WKWebView *)webView stopURLSchemeTask:(id<WKURLSchemeTask>)urlSchemeTask {
-    NSArray *keys = [schemeTaskMap allKeysForObject:urlSchemeTask];
-    for (NSNumber *key in keys) {
-        [schemeTaskMap removeObjectForKey:key];
-    }
+    if (!schemeTaskQueue) return;
+    dispatch_sync(schemeTaskQueue, ^{
+        NSArray *keys = [schemeTaskMap allKeysForObject:urlSchemeTask];
+        for (NSNumber *key in keys) {
+            [schemeTaskMap removeObjectForKey:key];
+        }
+    });
 }
 
 @end
@@ -52,7 +61,16 @@ static NSMutableDictionary *schemeTaskMap = nil;
 // then removes the task from the map.
 void deliverSchemeResponse(uintptr_t reqHandle, int statusCode, char *contentType,
                            void *body, int bodyLen) {
-    id<WKURLSchemeTask> task = [schemeTaskMap objectForKey:@(reqHandle)];
+    if (!schemeTaskQueue) return;
+
+    __block id<WKURLSchemeTask> task = nil;
+    dispatch_sync(schemeTaskQueue, ^{
+        task = [schemeTaskMap objectForKey:@(reqHandle)];
+        if (task) {
+            [schemeTaskMap removeObjectForKey:@(reqHandle)];
+        }
+    });
+
     if (!task) {
         return;
     }
@@ -72,5 +90,4 @@ void deliverSchemeResponse(uintptr_t reqHandle, int statusCode, char *contentTyp
     }
 
     [task didFinish];
-    [schemeTaskMap removeObjectForKey:@(reqHandle)];
 }

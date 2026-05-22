@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"embed"
+	"errors"
 	"fmt"
 	"net/url"
 	"strings"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/tituscheng/webviewgo/internal/types"
+	"modernc.org/sqlite"
 	_ "modernc.org/sqlite" // driver
 )
 
@@ -243,12 +245,10 @@ func IsConstraintError(err error) bool {
 	if err == nil {
 		return false
 	}
-	// sqlite.Error with code 2067 = SQLITE_CONSTRAINT_UNIQUE
-	// Use error string fallback for compatibility.
-	if fmt.Sprintf("%T", err) == "*sqlite.Error" {
-		// We can't import the specific type easily across versions,
-		// so rely on string matching.
-		return strings.Contains(err.Error(), "UNIQUE constraint failed")
+	var sqliteErr *sqlite.Error
+	if errors.As(err, &sqliteErr) {
+		return sqliteErr.Code() == 2067 // SQLITE_CONSTRAINT_UNIQUE
 	}
+	// Fallback for wrapped errors or other drivers.
 	return strings.Contains(err.Error(), "UNIQUE constraint failed")
 }
