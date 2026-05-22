@@ -13,13 +13,13 @@ import (
 
 // headlessWebView is a no-UI backend for CI/testing.
 type headlessWebView struct {
-	mu         sync.RWMutex
-	url        string
-	html       string
-	baseURL    string
-	title      string
-	width      int
-	height     int
+	mu          sync.RWMutex
+	url         string
+	html        string
+	baseURL     string
+	title       string
+	width       int
+	height      int
 	terminated  atomic.Bool
 	bindings    map[string]func([]any) (any, error)
 	rawBindings map[string]func(json.RawMessage) (json.RawMessage, error)

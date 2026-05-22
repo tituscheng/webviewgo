@@ -256,24 +256,20 @@ import (
 
 // darwinWebView is the macOS WKWebView backend.
 type darwinWebView struct {
-	handle     uintptr
-	window     unsafe.Pointer
-	webView    unsafe.Pointer
-	logger     *slog.Logger
-	bindings      map[string]func([]any) (any, error)
-	rawBindings   map[string]func(json.RawMessage) (json.RawMessage, error)
-	schemes       map[string]types.SchemeHandler
-	mu            sync.RWMutex
-	done          chan struct{}
-	ctx           context.Context
-	cancel        context.CancelFunc
-	terminated    bool
-	pending       sync.WaitGroup // for scheme tasks
-
-	// response pump (amortized Eval for Bind / BindRaw responses)
-	respCh   chan string
-	respOnce sync.Once
-	respStop chan struct{}
+	handle      uintptr
+	window      unsafe.Pointer
+	webView     unsafe.Pointer
+	logger      *slog.Logger
+	bindings    map[string]func([]any) (any, error)
+	rawBindings map[string]func(json.RawMessage) (json.RawMessage, error)
+	schemes     map[string]types.SchemeHandler
+	mu          sync.RWMutex
+	done        chan struct{}
+	ctx         context.Context
+	cancel      context.CancelFunc
+	terminated  bool
+	pending     sync.WaitGroup // for scheme tasks
+	pump        *responsePump  // batches Bind/BindRaw responses onto the main thread
 }
 
 // init pins the main goroutine to the main OS thread. On macOS, AppKit
@@ -324,6 +320,7 @@ func newNative(opts types.Options) (Platform, error) {
 	wv.ctx, wv.cancel = context.WithCancel(context.Background())
 	wv.handle = nextHandle(wv)
 	wv.window = unsafe.Pointer(window)
+	wv.pump = newResponsePump(wv.evalAsync)
 
 	webView := C.createWebView(window, C.uintptr_t(wv.handle), boolInt(opts.Devtools))
 	if webView == nil {
@@ -361,8 +358,8 @@ func (w *darwinWebView) Terminate() {
 	w.terminated = true
 	w.mu.Unlock()
 	w.cancel()
-	if w.respStop != nil {
-		close(w.respStop)
+	if w.pump != nil {
+		w.pump.shutdown()
 	}
 	C.stopApp()
 }
@@ -474,27 +471,11 @@ func (w *darwinWebView) Eval(script string) error {
 func (w *darwinWebView) Bind(name string, fn func(args []any) (any, error)) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	if _, ok := w.rawBindings[name]; ok {
+		return fmt.Errorf("webview: Bind %q: already bound as raw binding", name)
+	}
 	w.bindings[name] = fn
-
-	script := fmt.Sprintf(`
-	window.%s = function(...args) {
-		return new Promise((resolve, reject) => {
-			const id = '__go_' + Math.random().toString(36).slice(2);
-			window[id] = { resolve, reject };
-			window.webkit.messageHandlers.goBridge.postMessage({
-				bind: %q,
-				args: args,
-				cb: id
-			});
-		});
-	};
-`, name, name)
-	// Install as a document-start user script so the binding persists across
-	// navigations, and eval once so it is available on the current document.
-	cs := C.CString(script)
-	C.addUserScript(w.webView, cs)
-	C.free(unsafe.Pointer(cs))
-	_ = w.Eval(script)
+	w.installBindingLocked(name)
 	return nil
 }
 
@@ -502,13 +483,20 @@ func (w *darwinWebView) BindRaw(name string, fn func(json.RawMessage) (json.RawM
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if _, ok := w.bindings[name]; ok {
-		return fmt.Errorf("webview: BindRaw %q: name already bound as normal binding", name)
+		return fmt.Errorf("webview: BindRaw %q: already bound as normal binding", name)
 	}
 	if _, ok := w.rawBindings[name]; ok {
 		return fmt.Errorf("webview: BindRaw %q: already bound", name)
 	}
 	w.rawBindings[name] = fn
+	w.installBindingLocked(name)
+	return nil
+}
 
+// installBindingLocked injects the JS shim for a binding as a document-start
+// user script (so it survives navigation) and evaluates it once for the current
+// document. The caller must hold w.mu.
+func (w *darwinWebView) installBindingLocked(name string) {
 	script := fmt.Sprintf(`
 	window.%s = function(...args) {
 		return new Promise((resolve, reject) => {
@@ -526,7 +514,6 @@ func (w *darwinWebView) BindRaw(name string, fn func(json.RawMessage) (json.RawM
 	C.addUserScript(w.webView, cs)
 	C.free(unsafe.Pointer(cs))
 	_ = w.Eval(script)
-	return nil
 }
 
 // evalAsync runs script on the main thread; safe to call from a goroutine.
@@ -536,54 +523,11 @@ func (w *darwinWebView) evalAsync(script string) {
 	C.webViewEvalAsync(w.webView, cs)
 }
 
-// enqueueResponse queues a resolve/reject script for batched delivery via the
-// amortized response pump. This is the hot-path optimization for Bind/BindRaw.
-func (w *darwinWebView) enqueueResponse(script string) {
-	w.startResponsePump()
-	select {
-	case w.respCh <- script:
-	default:
-		// Buffer full — fall back to direct (rare, preserves correctness)
-		w.evalAsync(script)
-	}
-}
-
-func (w *darwinWebView) startResponsePump() {
-	w.respOnce.Do(func() {
-		w.respCh = make(chan string, 512)
-		w.respStop = make(chan struct{})
-		go w.runResponsePump()
-	})
-}
-
-func (w *darwinWebView) runResponsePump() {
-	for {
-		select {
-		case <-w.respStop:
-			return
-		case first, ok := <-w.respCh:
-			if !ok {
-				return
-			}
-			if w.terminated {
-				continue
-			}
-			batch := first
-			// Bounded drain for amortization (max ~32 scripts or ~64k chars)
-			for i := 0; i < 32 && len(batch) < 64*1024; i++ {
-				select {
-				case more := <-w.respCh:
-					batch += "\n" + more
-				default:
-					goto sendBatch
-				}
-			}
-		sendBatch:
-			if !w.terminated {
-				w.evalAsync(batch)
-			}
-		}
-	}
+// isTerminated reports whether the webview has been terminated.
+func (w *darwinWebView) isTerminated() bool {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	return w.terminated
 }
 
 func (w *darwinWebView) ClipboardReadText() (string, error) {
@@ -632,13 +576,14 @@ func goWebViewMessageReceived(handle C.uintptr_t, name *C.char, body *C.char) {
 			return
 		}
 
-		// Prefer raw (high-perf) then fall back to normal reflection-based binding.
+		// Prefer the raw (high-perf) binding, then fall back to the normal
+		// reflection-based one.
 		dw.mu.RLock()
-		rawFn, hasRaw := dw.rawBindings[msg.Bind]
-		normalFn, hasNormal := dw.bindings[msg.Bind]
+		rawFn := dw.rawBindings[msg.Bind]
+		normalFn := dw.bindings[msg.Bind]
 		dw.mu.RUnlock()
 
-		if !hasRaw && !hasNormal {
+		if rawFn == nil && normalFn == nil {
 			dw.logger.Warn("unknown binding", "name", msg.Bind)
 			return
 		}
@@ -650,43 +595,13 @@ func goWebViewMessageReceived(handle C.uintptr_t, name *C.char, body *C.char) {
 				}
 			}()
 
-			var script string
-			if hasRaw {
-				// Raw path: user owns (de)serialization. No reflection, no extra JSON round-trips.
-				res, err := rawFn(msg.Args)
-				if err != nil {
-					es, _ := json.Marshal(err.Error())
-					script = fmt.Sprintf("window['%s'].reject(new Error(%s)); delete window['%s'];", msg.CB, es, msg.CB)
-				} else {
-					// Insert user-provided JSON directly (must be valid expression or null/undefined).
-					if len(res) == 0 {
-						script = fmt.Sprintf("window['%s'].resolve(undefined); delete window['%s'];", msg.CB, msg.CB)
-					} else {
-						script = fmt.Sprintf("window['%s'].resolve(%s); delete window['%s'];", msg.CB, res, msg.CB)
-					}
-				}
-			} else {
-				// Normal path (unchanged behavior)
-				var args []any
-				_ = json.Unmarshal(msg.Args, &args) // best effort; original code let it flow into BridgeFn
-				res, err := normalFn(args)
-				if err != nil {
-					es, _ := json.Marshal(err.Error())
-					script = fmt.Sprintf("window['%s'].reject(new Error(%s)); delete window['%s'];", msg.CB, es, msg.CB)
-				} else {
-					rs, _ := json.Marshal(res)
-					script = fmt.Sprintf("window['%s'].resolve(%s); delete window['%s'];", msg.CB, rs, msg.CB)
-				}
-			}
-
-			dw.mu.RLock()
-			term := dw.terminated
-			dw.mu.RUnlock()
-			if term {
+			script := bindResponseScript(msg.CB, msg.Args, rawFn, normalFn)
+			if dw.isTerminated() {
 				return
 			}
-			// Must hop to the main thread via the amortized pump (reduces CGO/Eval cost).
-			dw.enqueueResponse(script)
+			// Hop to the main thread via the batching pump (WKWebView eval is
+			// main-thread only; batching amortizes the cgo/dispatch cost).
+			dw.pump.enqueue(script)
 		}()
 	}
 }

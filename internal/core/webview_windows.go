@@ -64,14 +64,16 @@ var windowsInstanceActive atomic.Bool
 
 // windowsWebView is the Windows WebView2 backend.
 type windowsWebView struct {
-	handle     uintptr
-	hwnd       unsafe.Pointer
-	logger     *slog.Logger
-	bindings   map[string]func([]any) (any, error)
-	schemes    map[string]types.SchemeHandler
-	mu         sync.RWMutex
-	done       chan struct{}
-	terminated bool
+	handle      uintptr
+	hwnd        unsafe.Pointer
+	logger      *slog.Logger
+	bindings    map[string]func([]any) (any, error)
+	rawBindings map[string]func(json.RawMessage) (json.RawMessage, error)
+	schemes     map[string]types.SchemeHandler
+	mu          sync.RWMutex
+	done        chan struct{}
+	terminated  bool
+	pump        *responsePump // batches Bind/BindRaw responses onto the UI thread
 }
 
 // init pins the main goroutine to the main OS thread. Windows COM/WebView2
@@ -97,13 +99,15 @@ func newNative(opts types.Options) (Platform, error) {
 	}
 
 	wv := &windowsWebView{
-		logger:   logOpts(opts),
-		bindings: make(map[string]func([]any) (any, error)),
-		schemes:  make(map[string]types.SchemeHandler),
-		done:     make(chan struct{}),
+		logger:      logOpts(opts),
+		bindings:    make(map[string]func([]any) (any, error)),
+		rawBindings: make(map[string]func(json.RawMessage) (json.RawMessage, error)),
+		schemes:     make(map[string]types.SchemeHandler),
+		done:        make(chan struct{}),
 	}
 	wv.handle = nextHandle(wv)
 	wv.hwnd = unsafe.Pointer(hwnd)
+	wv.pump = newResponsePump(wv.evalAsync)
 
 	if C.wvInitWebView2(hwnd, C.uintptr_t(wv.handle), C.int(opts.Width), C.int(opts.Height)) != 0 {
 		releaseHandle(wv.handle)
@@ -128,7 +132,17 @@ func (w *windowsWebView) Terminate() {
 	}
 	w.terminated = true
 	w.mu.Unlock()
+	if w.pump != nil {
+		w.pump.shutdown()
+	}
 	C.wvTerminateMsgLoop()
+}
+
+// isTerminated reports whether the webview has been terminated.
+func (w *windowsWebView) isTerminated() bool {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	return w.terminated
 }
 
 func (w *windowsWebView) Destroy() error {
@@ -220,23 +234,34 @@ func (w *windowsWebView) evalAsync(script string) {
 func (w *windowsWebView) Bind(name string, fn func(args []any) (any, error)) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	if _, ok := w.rawBindings[name]; ok {
+		return fmt.Errorf("webview: Bind %q: already bound as raw binding", name)
+	}
 	w.bindings[name] = fn
-
-	script := fmt.Sprintf(`
-if (!window.__go_webview_bound) {
-	window.chrome.webview.addEventListener('message', function(event) {
-		var msg = event.data;
-		if (msg && msg.cb && window[msg.cb]) {
-			if (msg.error) {
-				window[msg.cb].reject(new Error(msg.error));
-			} else {
-				window[msg.cb].resolve(msg.result);
-			}
-			delete window[msg.cb];
-		}
-	});
-	window.__go_webview_bound = true;
+	w.installBindingLocked(name)
+	return nil
 }
+
+func (w *windowsWebView) BindRaw(name string, fn func(json.RawMessage) (json.RawMessage, error)) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if _, ok := w.bindings[name]; ok {
+		return fmt.Errorf("webview: BindRaw %q: already bound as normal binding", name)
+	}
+	if _, ok := w.rawBindings[name]; ok {
+		return fmt.Errorf("webview: BindRaw %q: already bound", name)
+	}
+	w.rawBindings[name] = fn
+	w.installBindingLocked(name)
+	return nil
+}
+
+// installBindingLocked injects the JS shim for a binding as a document-created
+// script (so it survives navigation) and evaluates it once for the current
+// document. Responses are delivered by evaluating a resolve/reject expression
+// directly, so no inbound message listener is needed. The caller must hold w.mu.
+func (w *windowsWebView) installBindingLocked(name string) {
+	script := fmt.Sprintf(`
 window.%s = function(...args) {
 	return new Promise((resolve, reject) => {
 		const id = '__go_' + Math.random().toString(36).slice(2);
@@ -245,13 +270,10 @@ window.%s = function(...args) {
 	});
 };
 `, name, name)
-	// Install as a document-created script so the binding persists across
-	// navigations, and eval once so it is available on the current document.
 	cs := C.CString(script)
 	C.wvAddUserScript(cs)
 	C.free(unsafe.Pointer(cs))
 	_ = w.Eval(script)
-	return nil
 }
 
 func (w *windowsWebView) RegisterScheme(scheme string, handler types.SchemeHandler) error {
@@ -368,44 +390,40 @@ func goWebViewMessageReceived(handle C.uintptr_t, name *C.char, body *C.char) {
 
 	if n == "goBridge" {
 		var msg struct {
-			Bind string `json:"bind"`
-			Args []any  `json:"args"`
-			CB   string `json:"cb"`
+			Bind string          `json:"bind"`
+			Args json.RawMessage `json:"args"`
+			CB   string          `json:"cb"`
 		}
 		if err := json.Unmarshal([]byte(b), &msg); err != nil {
 			ww.logger.Error("failed to unmarshal bridge message", "error", err)
 			return
 		}
+
+		// Prefer the raw (high-perf) binding, then fall back to the normal one.
 		ww.mu.RLock()
-		fn, ok := ww.bindings[msg.Bind]
+		rawFn := ww.rawBindings[msg.Bind]
+		normalFn := ww.bindings[msg.Bind]
 		ww.mu.RUnlock()
-		if !ok {
+
+		if rawFn == nil && normalFn == nil {
 			ww.logger.Warn("unknown binding", "name", msg.Bind)
 			return
 		}
+
 		go func() {
 			defer func() {
 				if r := recover(); r != nil {
 					ww.logger.Error("binding callback panic", "name", msg.Bind, "recover", r)
 				}
 			}()
-			res, err := fn(msg.Args)
-			var script string
-			if err != nil {
-				es, _ := json.Marshal(err.Error())
-				script = fmt.Sprintf("window['%s'].reject(new Error(%s)); delete window['%s'];", msg.CB, es, msg.CB)
-			} else {
-				rs, _ := json.Marshal(res)
-				script = fmt.Sprintf("window['%s'].resolve(%s); delete window['%s'];", msg.CB, rs, msg.CB)
-			}
-			ww.mu.RLock()
-			term := ww.terminated
-			ww.mu.RUnlock()
-			if term {
+
+			script := bindResponseScript(msg.CB, msg.Args, rawFn, normalFn)
+			if ww.isTerminated() {
 				return
 			}
-			// Must hop to the UI thread: WebView2 calls are UI-thread only.
-			ww.evalAsync(script)
+			// Hop to the UI thread via the batching pump (WebView2 eval is
+			// UI-thread only; batching amortizes the cgo/dispatch cost).
+			ww.pump.enqueue(script)
 		}()
 	}
 }

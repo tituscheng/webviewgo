@@ -161,23 +161,19 @@ import (
 
 // linuxWebView is the Linux WebKitGTK backend.
 type linuxWebView struct {
-	handle     uintptr
-	window     unsafe.Pointer
-	webView    unsafe.Pointer
-	logger     *slog.Logger
-	bindings      map[string]func([]any) (any, error)
-	rawBindings   map[string]func(json.RawMessage) (json.RawMessage, error)
-	schemes       map[string]types.SchemeHandler
-	mu            sync.RWMutex
-	done          chan struct{}
-	ctx           context.Context
-	cancel        context.CancelFunc
-	terminated    bool
-
-	// response pump fields (amortized Eval) - same pattern as darwin
-	respCh   chan string
-	respOnce sync.Once
-	respStop chan struct{}
+	handle      uintptr
+	window      unsafe.Pointer
+	webView     unsafe.Pointer
+	logger      *slog.Logger
+	bindings    map[string]func([]any) (any, error)
+	rawBindings map[string]func(json.RawMessage) (json.RawMessage, error)
+	schemes     map[string]types.SchemeHandler
+	mu          sync.RWMutex
+	done        chan struct{}
+	ctx         context.Context
+	cancel      context.CancelFunc
+	terminated  bool
+	pump        *responsePump // batches Bind/BindRaw responses onto the GTK main thread
 }
 
 // init pins the main goroutine to the main OS thread. WebKitGTK/GTK requires
@@ -199,14 +195,16 @@ func newNative(opts types.Options) (Platform, error) {
 	}
 
 	wv := &linuxWebView{
-		logger:   logOpts(opts),
-		bindings: make(map[string]func([]any) (any, error)),
-		schemes:  make(map[string]types.SchemeHandler),
-		done:     make(chan struct{}),
+		logger:      logOpts(opts),
+		bindings:    make(map[string]func([]any) (any, error)),
+		rawBindings: make(map[string]func(json.RawMessage) (json.RawMessage, error)),
+		schemes:     make(map[string]types.SchemeHandler),
+		done:        make(chan struct{}),
 	}
 	wv.ctx, wv.cancel = context.WithCancel(context.Background())
 	wv.handle = nextHandle(wv)
 	wv.window = unsafe.Pointer(window)
+	wv.pump = newResponsePump(wv.evalAsync)
 
 	ua := C.CString(opts.UserAgent)
 	defer C.free(unsafe.Pointer(ua))
@@ -242,7 +240,24 @@ func (w *linuxWebView) Terminate() {
 	w.terminated = true
 	w.mu.Unlock()
 	w.cancel()
+	if w.pump != nil {
+		w.pump.shutdown()
+	}
 	C.stopGtk()
+}
+
+// isTerminated reports whether the webview has been terminated.
+func (w *linuxWebView) isTerminated() bool {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	return w.terminated
+}
+
+// evalAsync runs script on the GTK main thread; safe to call from a goroutine.
+func (w *linuxWebView) evalAsync(script string) {
+	cs := C.CString(script)
+	defer C.free(unsafe.Pointer(cs))
+	C.evalOnMainThread((*C.WebKitWebView)(w.webView), cs)
 }
 
 func (w *linuxWebView) Destroy() error {
@@ -311,7 +326,32 @@ func (w *linuxWebView) Eval(script string) error {
 func (w *linuxWebView) Bind(name string, fn func(args []any) (any, error)) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	if _, ok := w.rawBindings[name]; ok {
+		return fmt.Errorf("webview: Bind %q: already bound as raw binding", name)
+	}
 	w.bindings[name] = fn
+	w.installBindingLocked(name)
+	return nil
+}
+
+func (w *linuxWebView) BindRaw(name string, fn func(json.RawMessage) (json.RawMessage, error)) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if _, ok := w.bindings[name]; ok {
+		return fmt.Errorf("webview: BindRaw %q: already bound as normal binding", name)
+	}
+	if _, ok := w.rawBindings[name]; ok {
+		return fmt.Errorf("webview: BindRaw %q: already bound", name)
+	}
+	w.rawBindings[name] = fn
+	w.installBindingLocked(name)
+	return nil
+}
+
+// installBindingLocked injects the JS shim for a binding as a document-start
+// user script (so it survives navigation) and evaluates it once for the current
+// document. The caller must hold w.mu.
+func (w *linuxWebView) installBindingLocked(name string) {
 	script := fmt.Sprintf(`
 	window.%s = function(...args) {
 		return new Promise((resolve, reject) => {
@@ -325,13 +365,10 @@ func (w *linuxWebView) Bind(name string, fn func(args []any) (any, error)) error
 		});
 	};
 `, name, name)
-	// Install as a document-start user script so the binding persists across
-	// navigations, and eval once so it is available on the current document.
 	cs := C.CString(script)
 	C.addUserScript((*C.WebKitWebView)(w.webView), cs)
 	C.free(unsafe.Pointer(cs))
 	_ = w.Eval(script)
-	return nil
 }
 
 func (w *linuxWebView) RegisterScheme(scheme string, handler types.SchemeHandler) error {
@@ -382,45 +419,38 @@ func goWebViewMessageReceived(handle C.uintptr_t, name *C.char, body *C.char) {
 
 	if n == "goBridge" {
 		var msg struct {
-			Bind string `json:"bind"`
-			Args []any  `json:"args"`
-			CB   string `json:"cb"`
+			Bind string          `json:"bind"`
+			Args json.RawMessage `json:"args"`
+			CB   string          `json:"cb"`
 		}
 		if err := json.Unmarshal([]byte(b), &msg); err != nil {
 			lw.logger.Error("failed to unmarshal bridge message", "error", err)
 			return
 		}
+
+		// Prefer the raw (high-perf) binding, then fall back to the normal one.
 		lw.mu.RLock()
-		fn, ok := lw.bindings[msg.Bind]
+		rawFn := lw.rawBindings[msg.Bind]
+		normalFn := lw.bindings[msg.Bind]
 		lw.mu.RUnlock()
-		if !ok {
+
+		if rawFn == nil && normalFn == nil {
 			lw.logger.Warn("unknown binding", "name", msg.Bind)
 			return
 		}
+
 		go func() {
 			defer func() {
 				if r := recover(); r != nil {
 					lw.logger.Error("binding callback panic", "name", msg.Bind, "recover", r)
 				}
 			}()
-			res, err := fn(msg.Args)
-			var script string
-			if err != nil {
-				es, _ := json.Marshal(err.Error())
-				script = fmt.Sprintf("window['%s'].reject(new Error(%s)); delete window['%s'];", msg.CB, es, msg.CB)
-			} else {
-				rs, _ := json.Marshal(res)
-				script = fmt.Sprintf("window['%s'].resolve(%s); delete window['%s'];", msg.CB, rs, msg.CB)
-			}
-			lw.mu.RLock()
-			term := lw.terminated
-			lw.mu.RUnlock()
-			if term {
+
+			script := bindResponseScript(msg.CB, msg.Args, rawFn, normalFn)
+			if lw.isTerminated() {
 				return
 			}
-			cs := C.CString(script)
-			C.evalOnMainThread((*C.WebKitWebView)(lw.webView), cs)
-			C.free(unsafe.Pointer(cs))
+			lw.pump.enqueue(script)
 		}()
 	}
 }

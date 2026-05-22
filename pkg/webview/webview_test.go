@@ -2,6 +2,7 @@ package webview
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 	"time"
 )
@@ -195,5 +196,24 @@ func TestBind_RejectsInvalidName(t *testing.T) {
 		if err := wv.Bind(name, func() error { return nil }); err == nil {
 			t.Errorf("Bind(%q) should have been rejected", name)
 		}
+	}
+}
+
+func TestBindRaw_ValidatesNameAndBinds(t *testing.T) {
+	wv, err := New(Options{Headless: true, AppName: "webviewgo-test-bindraw"})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer wv.Destroy()
+
+	if err := wv.BindRaw("rawFn", func(args json.RawMessage) (json.RawMessage, error) {
+		return json.RawMessage(`null`), nil
+	}); err != nil {
+		t.Fatalf("BindRaw valid name rejected: %v", err)
+	}
+	if err := wv.BindRaw("bad name", func(args json.RawMessage) (json.RawMessage, error) {
+		return nil, nil
+	}); err == nil {
+		t.Error("BindRaw should reject invalid identifier")
 	}
 }
