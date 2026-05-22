@@ -107,6 +107,9 @@ func (w *headlessWebView) Eval(script string) error {
 func (w *headlessWebView) Bind(name string, fn func(args []any) (any, error)) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	if _, ok := w.rawBindings[name]; ok {
+		return fmt.Errorf("webview: Bind %q: already bound as raw binding", name)
+	}
 	w.bindings[name] = fn
 	return nil
 }
@@ -114,6 +117,12 @@ func (w *headlessWebView) Bind(name string, fn func(args []any) (any, error)) er
 func (w *headlessWebView) BindRaw(name string, fn func(json.RawMessage) (json.RawMessage, error)) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	if _, ok := w.bindings[name]; ok {
+		return fmt.Errorf("webview: BindRaw %q: already bound as normal binding", name)
+	}
+	if _, ok := w.rawBindings[name]; ok {
+		return fmt.Errorf("webview: BindRaw %q: already bound", name)
+	}
 	w.rawBindings[name] = fn
 	return nil
 }

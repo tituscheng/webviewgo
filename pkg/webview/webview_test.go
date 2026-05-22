@@ -134,6 +134,37 @@ func TestWebView_Bind(t *testing.T) {
 	}
 }
 
+func TestBind_BindRaw_Collision(t *testing.T) {
+	wv, err := New(Options{Headless: true, AppName: "webviewgo-test-collision"})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer wv.Destroy()
+
+	// Normal Bind first
+	if err := wv.Bind("shared", func() {}); err != nil {
+		t.Fatalf("Bind: %v", err)
+	}
+
+	// BindRaw on same name should fail
+	if err := wv.BindRaw("shared", func(json.RawMessage) (json.RawMessage, error) { return nil, nil }); err == nil {
+		t.Error("BindRaw on name already bound via Bind should have failed")
+	}
+
+	// Bind on a raw name should fail
+	if err := wv.BindRaw("rawOnly", func(json.RawMessage) (json.RawMessage, error) { return nil, nil }); err != nil {
+		t.Fatalf("BindRaw: %v", err)
+	}
+	if err := wv.Bind("rawOnly", func() {}); err == nil {
+		t.Error("Bind on name already bound via BindRaw should have failed")
+	}
+
+	// Duplicate BindRaw should fail
+	if err := wv.BindRaw("rawOnly", func(json.RawMessage) (json.RawMessage, error) { return nil, nil }); err == nil {
+		t.Error("duplicate BindRaw should have failed")
+	}
+}
+
 func TestWebView_ClipboardAndNotify(t *testing.T) {
 	wv, err := New(Options{
 		Headless: true,
