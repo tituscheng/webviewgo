@@ -1,6 +1,7 @@
 package core
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/url"
 	"sync"
@@ -19,19 +20,21 @@ type headlessWebView struct {
 	title      string
 	width      int
 	height     int
-	terminated atomic.Bool
-	bindings   map[string]func([]any) (any, error)
-	schemes    map[string]types.SchemeHandler
-	evals      []string
+	terminated  atomic.Bool
+	bindings    map[string]func([]any) (any, error)
+	rawBindings map[string]func(json.RawMessage) (json.RawMessage, error)
+	schemes     map[string]types.SchemeHandler
+	evals       []string
 }
 
 func newHeadless(opts types.Options) (Platform, error) {
 	return &headlessWebView{
-		title:    opts.Title,
-		width:    opts.Width,
-		height:   opts.Height,
-		bindings: make(map[string]func([]any) (any, error)),
-		schemes:  make(map[string]types.SchemeHandler),
+		title:       opts.Title,
+		width:       opts.Width,
+		height:      opts.Height,
+		bindings:    make(map[string]func([]any) (any, error)),
+		rawBindings: make(map[string]func(json.RawMessage) (json.RawMessage, error)),
+		schemes:     make(map[string]types.SchemeHandler),
 	}, nil
 }
 
@@ -105,6 +108,13 @@ func (w *headlessWebView) Bind(name string, fn func(args []any) (any, error)) er
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	w.bindings[name] = fn
+	return nil
+}
+
+func (w *headlessWebView) BindRaw(name string, fn func(json.RawMessage) (json.RawMessage, error)) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.rawBindings[name] = fn
 	return nil
 }
 

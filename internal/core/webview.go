@@ -1,6 +1,7 @@
 package core
 
 import (
+	"encoding/json"
 	"log/slog"
 	"sync"
 	"sync/atomic"
@@ -31,6 +32,9 @@ type Platform interface {
 
 	Eval(script string) error
 	Bind(name string, fn func(args []any) (any, error)) error
+
+	// BindRaw is the high-performance path. See pkg/webview.WebView.BindRaw for docs.
+	BindRaw(name string, fn func(args json.RawMessage) (json.RawMessage, error)) error
 
 	RegisterScheme(scheme string, handler types.SchemeHandler) error
 

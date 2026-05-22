@@ -9,7 +9,7 @@ first-class persistence, rich JS interop, and native UI helpers.
 - **SQLite-backed Cookie & Session Manager** — persistent, session-isolated,
   with optional `http.CookieJar` implementation and native store sync.
 - **Rich JS ↔ Go Interop** — automatic JSON marshaling for structs, slices,
-  maps; async Promise support.
+  maps; `BindRaw` escape hatch for high-frequency paths; async Promise support.
 - **Custom Protocols** — register custom URL schemes with `embed.FS` or
   `http.Handler` adapters.
 - **Native UI Helpers** — dialogs, clipboard, notifications, frameless windows.
@@ -97,6 +97,8 @@ cm.SetCookie(webview.Cookie{
 
 ## JS Interop
 
+Basic usage with automatic JSON marshaling and reflection:
+
 ```go
 wv.Bind("add", func(a, b int) (int, error) {
     return a + b, nil
@@ -108,6 +110,16 @@ JavaScript receives a Promise:
 ```js
 const result = await window.add(2, 3);
 ```
+
+For hot paths, use `BindRaw` to bypass reflection and the standard JSON layer (you control serialization):
+
+```go
+wv.BindRaw("fastPath", func(args json.RawMessage) (json.RawMessage, error) {
+    // e.g. use jsoniter, msgpack, or a binary protocol
+})
+```
+
+> **Performance note**: The default `Bind` path uses reflection and one main-thread evaluation per response. `BindRaw` combined with the library’s internal batched response pump significantly reduces overhead for high-frequency messaging.
 
 ## Headless Testing
 

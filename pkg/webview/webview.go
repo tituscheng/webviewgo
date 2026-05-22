@@ -2,6 +2,7 @@ package webview
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -39,6 +40,16 @@ type WebView interface {
 
 	Eval(script string) error
 	Bind(name string, fn any) error
+
+	// BindRaw is the high-performance variant of Bind. It bypasses reflection
+	// and the standard JSON (de)serialization used by Bind. The handler receives
+	// the raw JSON-encoded argument array (as produced by the browser's
+	// postMessage) and must return a JSON-encoded value (as a string that will
+	// be inserted directly into the resolve expression).
+	//
+	// Use BindRaw for hot paths where you control serialization (e.g. with
+	// jsoniter, msgpack, protobuf, or a binary format encoded inside a JSON string).
+	BindRaw(name string, fn func(args json.RawMessage) (json.RawMessage, error)) error
 
 	CookieManager() CookieManager
 	RegisterScheme(scheme string, handler SchemeHandler) error
@@ -196,6 +207,13 @@ func (w *webview) Bind(name string, fn any) error {
 		return fmt.Errorf("webview: Bind %q: %w", name, err)
 	}
 	return w.platform.Bind(name, bridge)
+}
+
+func (w *webview) BindRaw(name string, fn func(args json.RawMessage) (json.RawMessage, error)) error {
+	if !isValidJSIdentifier(name) {
+		return fmt.Errorf("webview: BindRaw %q: name must be a valid JavaScript identifier", name)
+	}
+	return w.platform.BindRaw(name, fn)
 }
 
 // isValidJSIdentifier reports whether name is a safe top-level identifier to

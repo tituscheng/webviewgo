@@ -165,13 +165,19 @@ type linuxWebView struct {
 	window     unsafe.Pointer
 	webView    unsafe.Pointer
 	logger     *slog.Logger
-	bindings   map[string]func([]any) (any, error)
-	schemes    map[string]types.SchemeHandler
-	mu         sync.RWMutex
-	done       chan struct{}
-	ctx        context.Context
-	cancel     context.CancelFunc
-	terminated bool
+	bindings      map[string]func([]any) (any, error)
+	rawBindings   map[string]func(json.RawMessage) (json.RawMessage, error)
+	schemes       map[string]types.SchemeHandler
+	mu            sync.RWMutex
+	done          chan struct{}
+	ctx           context.Context
+	cancel        context.CancelFunc
+	terminated    bool
+
+	// response pump fields (amortized Eval) - same pattern as darwin
+	respCh   chan string
+	respOnce sync.Once
+	respStop chan struct{}
 }
 
 // init pins the main goroutine to the main OS thread. WebKitGTK/GTK requires
