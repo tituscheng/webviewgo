@@ -23,6 +23,19 @@ static void waitForCookieStore(dispatch_semaphore_t sem) {
     }
 }
 
+// runOnMain executes block on the main thread. WKWebView and its cookie store
+// must be touched only on the main thread; cookie sync is frequently triggered
+// from a background goroutine (the cookie manager's flush), so the WebKit work
+// is hopped onto the main queue. When already on the main thread the block runs
+// inline so the existing run-loop-pumping wait still applies.
+static void runOnMain(void (^block)(void)) {
+    if ([NSThread isMainThread]) {
+        block();
+    } else {
+        dispatch_sync(dispatch_get_main_queue(), block);
+    }
+}
+
 static void syncCookie(void *webViewPtr, const char *name, const char *value,
                        const char *domain, const char *path, double expires,
                        int secure, int httpOnly, int sameSite) {
@@ -57,39 +70,43 @@ static void syncCookie(void *webViewPtr, const char *name, const char *value,
     NSHTTPCookie *cookie = [NSHTTPCookie cookieWithProperties:props];
     if (!cookie) return;
 
-    dispatch_semaphore_t sem = dispatch_semaphore_create(0);
-    [store setCookie:cookie completionHandler:^{
-        dispatch_semaphore_signal(sem);
-    }];
-    waitForCookieStore(sem);
-    dispatch_release(sem);
+    runOnMain(^{
+        dispatch_semaphore_t sem = dispatch_semaphore_create(0);
+        [store setCookie:cookie completionHandler:^{
+            dispatch_semaphore_signal(sem);
+        }];
+        waitForCookieStore(sem);
+        dispatch_release(sem);
+    });
 }
 
 static void clearAllCookies(void *webViewPtr) {
     WKWebView *webView = (WKWebView *)webViewPtr;
     WKHTTPCookieStore *store = webView.configuration.websiteDataStore.httpCookieStore;
 
-    // Fetch first, then delete at the top level. Deleting inside the
-    // getAllCookies handler would require re-entrant run-loop pumping (see
-    // waitForCookieStore), so we hoist the snapshot out instead.
-    __block NSArray<NSHTTPCookie *> *snapshot = nil;
-    dispatch_semaphore_t sem = dispatch_semaphore_create(0);
-    [store getAllCookies:^(NSArray<NSHTTPCookie *> *cookies) {
-        snapshot = [cookies copy];
-        dispatch_semaphore_signal(sem);
-    }];
-    waitForCookieStore(sem);
-    dispatch_release(sem);
-
-    for (NSHTTPCookie *c in snapshot) {
-        dispatch_semaphore_t inner = dispatch_semaphore_create(0);
-        [store deleteCookie:c completionHandler:^{
-            dispatch_semaphore_signal(inner);
+    runOnMain(^{
+        // Fetch first, then delete at the top level. Deleting inside the
+        // getAllCookies handler would require re-entrant run-loop pumping (see
+        // waitForCookieStore), so we hoist the snapshot out instead.
+        __block NSArray<NSHTTPCookie *> *snapshot = nil;
+        dispatch_semaphore_t sem = dispatch_semaphore_create(0);
+        [store getAllCookies:^(NSArray<NSHTTPCookie *> *cookies) {
+            snapshot = [cookies copy];
+            dispatch_semaphore_signal(sem);
         }];
-        waitForCookieStore(inner);
-        dispatch_release(inner);
-    }
-    [snapshot release];
+        waitForCookieStore(sem);
+        dispatch_release(sem);
+
+        for (NSHTTPCookie *c in snapshot) {
+            dispatch_semaphore_t inner = dispatch_semaphore_create(0);
+            [store deleteCookie:c completionHandler:^{
+                dispatch_semaphore_signal(inner);
+            }];
+            waitForCookieStore(inner);
+            dispatch_release(inner);
+        }
+        [snapshot release];
+    });
 }
 */
 import "C"

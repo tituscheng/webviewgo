@@ -52,14 +52,16 @@ static void stopApp(void) {
 }
 
 // Window / WebView helpers use void* to avoid cgo struct/objc class mismatch.
-static void *createWindow(int width, int height, int styleMask, const char *title) {
+static void *createWindow(int width, int height, int styleMask, const char *title, int center) {
     NSRect frame = NSMakeRect(0, 0, width, height);
     NSWindow *window = [[NSWindow alloc] initWithContentRect:frame
                                                    styleMask:styleMask
                                                      backing:NSBackingStoreBuffered
                                                        defer:NO];
     [window setTitle:[NSString stringWithUTF8String:title]];
-    [window center];
+    if (center) {
+        [window center];
+    }
     return window;
 }
 
@@ -105,6 +107,32 @@ static void webViewEval(void *webViewPtr, const char *script, uintptr_t handle) 
     [webView evaluateJavaScript:nsscript completionHandler:^(id result, NSError *error) {
         // Async; handled via promise wrapper on Go side.
     }];
+}
+
+// webViewEvalAsync evaluates JavaScript on the main thread. WKWebView methods
+// must be called on the main thread, so callers running on a background
+// goroutine (e.g. bind-callback completion) must route through this. The
+// NSString is created on the calling thread and retained by the block, so the
+// C string may be freed as soon as this function returns.
+static void webViewEvalAsync(void *webViewPtr, const char *script) {
+    WKWebView *webView = (WKWebView *)webViewPtr;
+    NSString *nsscript = [NSString stringWithUTF8String:script];
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [webView evaluateJavaScript:nsscript completionHandler:nil];
+    });
+}
+
+// addUserScript installs a script that runs at document start on every page
+// load (current and future navigations). Used so JS-to-Go bindings survive
+// navigation instead of being defined once via a transient eval.
+static void addUserScript(void *webViewPtr, const char *source) {
+    WKWebView *webView = (WKWebView *)webViewPtr;
+    NSString *src = [NSString stringWithUTF8String:source];
+    WKUserScript *script = [[WKUserScript alloc] initWithSource:src
+                                                 injectionTime:WKUserScriptInjectionTimeAtDocumentStart
+                                              forMainFrameOnly:NO];
+    [webView.configuration.userContentController addUserScript:script];
+    [script release];
 }
 
 static void windowSetTitle(void *windowPtr, const char *title) {
@@ -260,12 +288,18 @@ func newNative(opts types.Options) (Platform, error) {
 	defer C.free(unsafe.Pointer(title))
 
 	styleMask := C.int(C.NSWindowStyleMaskTitled | C.NSWindowStyleMaskClosable |
-		C.NSWindowStyleMaskMiniaturizable | C.NSWindowStyleMaskResizable)
+		C.NSWindowStyleMaskMiniaturizable)
+	if opts.Resizable {
+		styleMask |= C.NSWindowStyleMaskResizable
+	}
 	if opts.Frameless {
-		styleMask = C.NSWindowStyleMaskBorderless | C.NSWindowStyleMaskResizable
+		styleMask = C.NSWindowStyleMaskBorderless
+		if opts.Resizable {
+			styleMask |= C.NSWindowStyleMaskResizable
+		}
 	}
 
-	window := C.createWindow(C.int(opts.Width), C.int(opts.Height), styleMask, title)
+	window := C.createWindow(C.int(opts.Width), C.int(opts.Height), styleMask, title, boolInt(opts.Center))
 	if window == nil {
 		return nil, fmt.Errorf("core: failed to create window")
 	}
@@ -445,8 +479,20 @@ func (w *darwinWebView) Bind(name string, fn func(args []any) (any, error)) erro
 		});
 	};
 `, name, name)
+	// Install as a document-start user script so the binding persists across
+	// navigations, and eval once so it is available on the current document.
+	cs := C.CString(script)
+	C.addUserScript(w.webView, cs)
+	C.free(unsafe.Pointer(cs))
 	_ = w.Eval(script)
 	return nil
+}
+
+// evalAsync runs script on the main thread; safe to call from a goroutine.
+func (w *darwinWebView) evalAsync(script string) {
+	cs := C.CString(script)
+	defer C.free(unsafe.Pointer(cs))
+	C.webViewEvalAsync(w.webView, cs)
 }
 
 func (w *darwinWebView) ClipboardReadText() (string, error) {
@@ -522,7 +568,8 @@ func goWebViewMessageReceived(handle C.uintptr_t, name *C.char, body *C.char) {
 			if term {
 				return
 			}
-			_ = dw.Eval(script)
+			// Must hop to the main thread: WKWebView calls are main-thread only.
+			dw.evalAsync(script)
 		}()
 	}
 }

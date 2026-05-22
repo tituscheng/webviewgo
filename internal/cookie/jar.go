@@ -4,7 +4,6 @@ import (
 	"context"
 	"net/http"
 	"net/url"
-	"sort"
 	"strings"
 	"sync"
 
@@ -26,9 +25,14 @@ func NewJar(store *Store, sessionID string) *Jar {
 // SetCookies implements http.CookieJar.
 func (j *Jar) SetCookies(u *url.URL, cookies []*http.Cookie) {
 	ctx := context.Background()
+	sid := j.SessionID()
+	host := canonicalHost(u.Hostname())
 	for _, hc := range cookies {
-		c := fromHTTP(hc, j.sessionID)
-		c.Domain = effectiveDomain(u.Hostname(), c.Domain)
+		c := fromHTTP(hc, sid)
+		// A cookie with no Domain attribute is host-only: it may only be sent
+		// back to the exact host that set it.
+		c.HostOnly = hc.Domain == ""
+		c.Domain = canonicalHost(effectiveDomain(host, hc.Domain))
 		if c.Path == "" {
 			c.Path = "/"
 		}
@@ -39,7 +43,7 @@ func (j *Jar) SetCookies(u *url.URL, cookies []*http.Cookie) {
 // Cookies implements http.CookieJar.
 func (j *Jar) Cookies(u *url.URL) []*http.Cookie {
 	ctx := context.Background()
-	items, err := j.store.GetCookies(ctx, u.String(), j.sessionID)
+	items, err := j.store.GetCookies(ctx, u.String(), j.SessionID())
 	if err != nil {
 		return nil
 	}
@@ -118,16 +122,11 @@ func effectiveDomain(hostname, cookieDomain string) string {
 	return hostname
 }
 
-// sortCookies sorts cookies by path length descending (longest first) for jar ordering.
-func sortCookies(cookies []*http.Cookie) {
-	sort.Slice(cookies, func(i, j int) bool {
-		return len(cookies[i].Path) > len(cookies[j].Path)
-	})
-}
-
+// canonicalHost normalises a host or cookie domain for comparison: lower-cased
+// with any trailing root dot and any leading "." (a Domain attribute prefix)
+// removed.
 func canonicalHost(host string) string {
-	if strings.HasSuffix(host, ".") {
-		host = host[:len(host)-1]
-	}
+	host = strings.TrimSuffix(host, ".")
+	host = strings.TrimPrefix(host, ".")
 	return strings.ToLower(host)
 }

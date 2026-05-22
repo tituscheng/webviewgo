@@ -15,6 +15,8 @@ extern void wvDestroyWebView2();
 extern void wvNavigate(const char *url);
 extern void wvLoadHTML(const char *html);
 extern void wvEval(const char *script);
+extern void wvEvalAsync(const char *script);
+extern void wvAddUserScript(const char *script);
 extern void wvReload();
 extern void wvGoBack();
 extern void wvGoForward();
@@ -48,11 +50,17 @@ import (
 	"fmt"
 	"runtime"
 	"sync"
+	"sync/atomic"
 	"unsafe"
 
 	"github.com/tituscheng/webviewgo/internal/types"
 	"log/slog"
 )
+
+// The WebView2 backend keeps the controller/webview in C global state, so only
+// one instance can exist per process. This guard rejects a second New() rather
+// than silently clobbering the first.
+var windowsInstanceActive atomic.Bool
 
 // windowsWebView is the Windows WebView2 backend.
 type windowsWebView struct {
@@ -75,12 +83,16 @@ func init() {
 }
 
 func newNative(opts types.Options) (Platform, error) {
+	if !windowsInstanceActive.CompareAndSwap(false, true) {
+		return nil, fmt.Errorf("core: only one webview instance is supported per process on windows")
+	}
 
 	title := C.CString(opts.Title)
 	defer C.free(unsafe.Pointer(title))
 
 	hwnd := C.wvCreateWindow(C.int(opts.Width), C.int(opts.Height), title)
 	if hwnd == nil {
+		windowsInstanceActive.Store(false)
 		return nil, fmt.Errorf("core: failed to create window")
 	}
 
@@ -94,6 +106,8 @@ func newNative(opts types.Options) (Platform, error) {
 	wv.hwnd = unsafe.Pointer(hwnd)
 
 	if C.wvInitWebView2(hwnd, C.uintptr_t(wv.handle), C.int(opts.Width), C.int(opts.Height)) != 0 {
+		releaseHandle(wv.handle)
+		windowsInstanceActive.Store(false)
 		return nil, fmt.Errorf("core: failed to initialize WebView2. Ensure the WebView2 Runtime is installed.")
 	}
 
@@ -125,6 +139,7 @@ func (w *windowsWebView) Destroy() error {
 	}
 	C.wvDestroyWebView2()
 	releaseHandle(w.handle)
+	windowsInstanceActive.Store(false)
 	return nil
 }
 
@@ -195,6 +210,13 @@ func (w *windowsWebView) Eval(script string) error {
 	return nil
 }
 
+// evalAsync runs script on the UI thread; safe to call from a goroutine.
+func (w *windowsWebView) evalAsync(script string) {
+	cs := C.CString(script)
+	defer C.free(unsafe.Pointer(cs))
+	C.wvEvalAsync(cs)
+}
+
 func (w *windowsWebView) Bind(name string, fn func(args []any) (any, error)) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -223,6 +245,11 @@ window.%s = function(...args) {
 	});
 };
 `, name, name)
+	// Install as a document-created script so the binding persists across
+	// navigations, and eval once so it is available on the current document.
+	cs := C.CString(script)
+	C.wvAddUserScript(cs)
+	C.free(unsafe.Pointer(cs))
 	_ = w.Eval(script)
 	return nil
 }
@@ -377,7 +404,8 @@ func goWebViewMessageReceived(handle C.uintptr_t, name *C.char, body *C.char) {
 			if term {
 				return
 			}
-			_ = ww.Eval(script)
+			// Must hop to the UI thread: WebView2 calls are UI-thread only.
+			ww.evalAsync(script)
 		}()
 	}
 }

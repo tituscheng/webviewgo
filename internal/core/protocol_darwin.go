@@ -8,7 +8,7 @@ package core
 #import "protocol_darwin_delegate.h"
 
 // Forward declaration for the response delivery function defined in protocol_darwin_delegate.m
-extern void deliverSchemeResponse(uintptr_t reqHandle, int statusCode, char *contentType,
+extern void deliverSchemeResponse(uintptr_t reqHandle, int statusCode, char *headers,
                                   void *body, int bodyLen);
 
 static void registerScheme(void *configPtr, const char *scheme, uintptr_t handle) {
@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"unsafe"
 
 	"github.com/tituscheng/webviewgo/internal/types"
@@ -44,11 +45,45 @@ func (w *darwinWebView) RegisterScheme(scheme string, handler types.SchemeHandle
 	return nil
 }
 
-const maxSchemeResponseBody = 100 << 20 // 100 MiB
+const maxSchemeBodySize = 100 << 20 // 100 MiB
+
+// deliverText completes a scheme task with a plain-text status response.
+func deliverText(reqHandle C.uintptr_t, status int, msg string) {
+	headers := C.CString("Content-Type: text/plain")
+	body := C.CString(msg)
+	C.deliverSchemeResponse(reqHandle, C.int(status), headers, unsafe.Pointer(body), C.int(len(msg)))
+	C.free(unsafe.Pointer(headers))
+	C.free(unsafe.Pointer(body))
+}
+
+// headerBlob renders an http.Header as "Key: Value\n" lines for the cgo call.
+func headerBlob(h http.Header) string {
+	var b strings.Builder
+	for k, vals := range h {
+		for _, v := range vals {
+			b.WriteString(k)
+			b.WriteString(": ")
+			b.WriteString(v)
+			b.WriteByte('\n')
+		}
+	}
+	return b.String()
+}
+
+// parseHeaderBlob parses "Key: Value\n" lines back into an http.Header.
+func parseHeaderBlob(s string) http.Header {
+	h := http.Header{}
+	for _, line := range strings.Split(s, "\n") {
+		if i := strings.Index(line, ": "); i >= 0 {
+			h.Add(line[:i], line[i+2:])
+		}
+	}
+	return h
+}
 
 //export goProtocolHandler
 func goProtocolHandler(handle C.uintptr_t, scheme *C.char, url *C.char, method *C.char,
-	body unsafe.Pointer, bodyLen C.int, reqHandle C.uintptr_t) {
+	headers *C.char, body unsafe.Pointer, bodyLen C.int, reqHandle C.uintptr_t) {
 	wv, ok := getPlatform(uintptr(handle))
 	if !ok {
 		return
@@ -57,16 +92,12 @@ func goProtocolHandler(handle C.uintptr_t, scheme *C.char, url *C.char, method *
 	s := C.GoString(scheme)
 	u := C.GoString(url)
 	m := C.GoString(method)
+	reqHeaders := parseHeaderBlob(C.GoString(headers))
 
 	var reqBody []byte
 	if body != nil && bodyLen > 0 {
-		if int(bodyLen) > maxSchemeResponseBody {
-			// Body too large — send 413 and clean up.
-			cct := C.CString("text/plain")
-			msg := C.CString("Request body too large")
-			C.deliverSchemeResponse(C.uintptr_t(reqHandle), C.int(http.StatusRequestEntityTooLarge), cct, unsafe.Pointer(msg), C.int(len("Request body too large")))
-			C.free(unsafe.Pointer(cct))
-			C.free(unsafe.Pointer(msg))
+		if int(bodyLen) > maxSchemeBodySize {
+			deliverText(reqHandle, http.StatusRequestEntityTooLarge, "Request body too large")
 			return
 		}
 		reqBody = C.GoBytes(body, bodyLen)
@@ -77,11 +108,7 @@ func goProtocolHandler(handle C.uintptr_t, scheme *C.char, url *C.char, method *
 	dw.mu.RUnlock()
 	if !ok {
 		// No handler registered — send 404 so the task is cleaned up.
-		cct := C.CString("text/plain")
-		msg := C.CString("Not Found")
-		C.deliverSchemeResponse(C.uintptr_t(reqHandle), C.int(http.StatusNotFound), cct, unsafe.Pointer(msg), C.int(len("Not Found")))
-		C.free(unsafe.Pointer(cct))
-		C.free(unsafe.Pointer(msg))
+		deliverText(reqHandle, http.StatusNotFound, "Not Found")
 		return
 	}
 
@@ -91,11 +118,7 @@ func goProtocolHandler(handle C.uintptr_t, scheme *C.char, url *C.char, method *
 		defer func() {
 			if r := recover(); r != nil {
 				// Ensure the scheme task is always completed, even on panic.
-				cct := C.CString("text/plain")
-				msg := C.CString("Internal Server Error")
-				C.deliverSchemeResponse(C.uintptr_t(reqHandle), C.int(http.StatusInternalServerError), cct, unsafe.Pointer(msg), C.int(len("Internal Server Error")))
-				C.free(unsafe.Pointer(cct))
-				C.free(unsafe.Pointer(msg))
+				deliverText(reqHandle, http.StatusInternalServerError, "Internal Server Error")
 			}
 		}()
 
@@ -103,18 +126,15 @@ func goProtocolHandler(handle C.uintptr_t, scheme *C.char, url *C.char, method *
 		term := dw.terminated
 		dw.mu.RUnlock()
 		if term {
-			cct := C.CString("text/plain")
-			msg := C.CString("Service Unavailable")
-			C.deliverSchemeResponse(C.uintptr_t(reqHandle), C.int(http.StatusServiceUnavailable), cct, unsafe.Pointer(msg), C.int(len("Service Unavailable")))
-			C.free(unsafe.Pointer(cct))
-			C.free(unsafe.Pointer(msg))
+			deliverText(reqHandle, http.StatusServiceUnavailable, "Service Unavailable")
 			return
 		}
 
 		resp := handler(&types.Request{
-			Method: m,
-			URL:    u,
-			Body:   reqBody,
+			Method:  m,
+			URL:     u,
+			Headers: reqHeaders,
+			Body:    reqBody,
 		})
 		if resp == nil {
 			resp = &types.Response{StatusCode: http.StatusNotFound}
@@ -123,7 +143,7 @@ func goProtocolHandler(handle C.uintptr_t, scheme *C.char, url *C.char, method *
 		var respBody []byte
 		if resp.Body != nil {
 			var err error
-			respBody, err = io.ReadAll(io.LimitReader(resp.Body, maxSchemeResponseBody))
+			respBody, err = io.ReadAll(io.LimitReader(resp.Body, maxSchemeBodySize))
 			if c, ok := resp.Body.(io.Closer); ok {
 				c.Close()
 			}
@@ -140,26 +160,26 @@ func goProtocolHandler(handle C.uintptr_t, scheme *C.char, url *C.char, method *
 			return
 		}
 
-		ct := resp.Headers.Get("Content-Type")
-		if ct == "" {
-			ct = "application/octet-stream"
+		// Forward all response headers (not just Content-Type), defaulting the
+		// content type when the handler did not set one.
+		hdr := resp.Headers
+		if hdr == nil {
+			hdr = http.Header{}
 		}
-
-		var cct *C.char
-		if ct != "" {
-			cct = C.CString(ct)
+		if hdr.Get("Content-Type") == "" {
+			hdr = hdr.Clone()
+			hdr.Set("Content-Type", "application/octet-stream")
 		}
+		cheaders := C.CString(headerBlob(hdr))
 
 		var cbody unsafe.Pointer
 		if len(respBody) > 0 {
 			cbody = C.CBytes(respBody)
 		}
 
-		C.deliverSchemeResponse(C.uintptr_t(reqHandle), C.int(resp.StatusCode), cct, cbody, C.int(len(respBody)))
+		C.deliverSchemeResponse(C.uintptr_t(reqHandle), C.int(resp.StatusCode), cheaders, cbody, C.int(len(respBody)))
 
-		if cct != nil {
-			C.free(unsafe.Pointer(cct))
-		}
+		C.free(unsafe.Pointer(cheaders))
 		if cbody != nil {
 			C.free(cbody)
 		}

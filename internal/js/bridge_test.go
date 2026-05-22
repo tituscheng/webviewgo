@@ -173,3 +173,39 @@ func TestWrap_ErrorWrapping(t *testing.T) {
 		t.Fatalf("expected 'inner failure', got %v", err.Error())
 	}
 }
+
+func TestWrap_Variadic(t *testing.T) {
+	fn, err := Wrap(func(prefix string, nums ...int) (int, error) {
+		sum := len(prefix)
+		for _, n := range nums {
+			sum += n
+		}
+		return sum, nil
+	})
+	if err != nil {
+		t.Fatalf("wrap: %v", err)
+	}
+	res, err := fn([]any{"ab", float64(1), float64(2), float64(3)})
+	if err != nil {
+		t.Fatalf("call: %v", err)
+	}
+	if res != 8 { // len("ab")=2 + 1+2+3
+		t.Fatalf("expected 8, got %v", res)
+	}
+}
+
+func TestWrap_VariadicNoExtra(t *testing.T) {
+	fn, err := Wrap(func(nums ...int) (int, error) {
+		return len(nums), nil
+	})
+	if err != nil {
+		t.Fatalf("wrap: %v", err)
+	}
+	res, err := fn(nil)
+	if err != nil {
+		t.Fatalf("call: %v", err)
+	}
+	if res != 0 {
+		t.Fatalf("expected 0, got %v", res)
+	}
+}

@@ -4,7 +4,7 @@
 #import <WebKit/WebKit.h>
 
 extern void goProtocolHandler(uintptr_t handle, char *scheme, char *url, char *method,
-                              void *body, int bodyLen, uintptr_t reqHandle);
+                              char *headers, void *body, int bodyLen, uintptr_t reqHandle);
 
 @interface SchemeHandlerDelegate : NSObject <WKURLSchemeHandler>
 @property uintptr_t handle;

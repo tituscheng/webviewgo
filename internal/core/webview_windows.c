@@ -40,12 +40,18 @@ struct IUnknown {
 // ... 40=GoBack, 41=GoForward
 #define WV2_NAVIGATE 5
 #define WV2_NAVIGATE_TO_STRING 6
+#define WV2_ADD_SCRIPT_ON_DOCUMENT_CREATED 27
 #define WV2_EXECUTE_SCRIPT 29
 #define WV2_RELOAD 31
 #define WV2_POST_WEB_MESSAGE_AS_JSON 33
 #define WV2_ADD_WEB_MESSAGE_RECEIVED 34
 #define WV2_GO_BACK 40
 #define WV2_GO_FORWARD 41
+
+// Custom window message used to marshal JS evaluation onto the UI thread.
+// WebView2 (like all WebView2 calls) must be used on the thread that created
+// the message loop; bind callbacks complete on a background goroutine.
+#define WV_WM_EVAL (WM_APP + 1)
 
 static HRESULT STDMETHODCALLTYPE wv2_navigate(ICoreWebView2 *wv, LPCWSTR url) {
     typedef HRESULT (STDMETHODCALLTYPE *Fn)(ICoreWebView2 *, LPCWSTR);
@@ -60,6 +66,11 @@ static HRESULT STDMETHODCALLTYPE wv2_navigate_to_string(ICoreWebView2 *wv, LPCWS
 static HRESULT STDMETHODCALLTYPE wv2_execute_script(ICoreWebView2 *wv, LPCWSTR script) {
     typedef HRESULT (STDMETHODCALLTYPE *Fn)(ICoreWebView2 *, LPCWSTR);
     return ((Fn)((void ***)wv)[0][WV2_EXECUTE_SCRIPT])(wv, script);
+}
+
+static HRESULT STDMETHODCALLTYPE wv2_add_script_on_document_created(ICoreWebView2 *wv, LPCWSTR script, IUnknown *handler) {
+    typedef HRESULT (STDMETHODCALLTYPE *Fn)(ICoreWebView2 *, LPCWSTR, IUnknown *);
+    return ((Fn)((void ***)wv)[0][WV2_ADD_SCRIPT_ON_DOCUMENT_CREATED])(wv, script, handler);
 }
 
 static HRESULT STDMETHODCALLTYPE wv2_reload(ICoreWebView2 *wv) {
@@ -246,6 +257,18 @@ static HRESULT STDMETHODCALLTYPE envHandler_Invoke(IUnknown *self, HRESULT error
 
 static LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     switch (msg) {
+    case WV_WM_EVAL: {
+        // Runs on the UI thread; lParam is a heap-allocated UTF-16 script that
+        // we own and must free.
+        wchar_t *script = (wchar_t *)lParam;
+        if (script) {
+            if (g_webview) {
+                wv2_execute_script(g_webview, script);
+            }
+            free(script);
+        }
+        return 0;
+    }
     case WM_SIZE:
         if (g_controller && g_hwnd) {
             RECT bounds;
@@ -410,6 +433,43 @@ void wvEval(const char *script) {
         wv2_execute_script(g_webview, wscript);
         free(wscript);
     }
+}
+
+// wvEvalAsync marshals JS evaluation onto the UI thread. Safe to call from any
+// thread (PostMessageW is thread-safe). The UI thread frees the script.
+void wvEvalAsync(const char *script) {
+    if (!g_hwnd) return;
+    wchar_t *wscript = utf8_to_utf16(script);
+    if (!wscript) return;
+    if (!PostMessageW(g_hwnd, WV_WM_EVAL, 0, (LPARAM)wscript)) {
+        free(wscript); // post failed; avoid leaking the buffer
+    }
+}
+
+// No-op completion handler for AddScriptToExecuteOnDocumentCreated. Its Invoke
+// receives (HRESULT errorCode, LPCWSTR id); the id pointer maps onto the
+// generic void* slot.
+static HRESULT STDMETHODCALLTYPE addScriptHandler_Invoke(IUnknown *self, HRESULT errorCode, void *id) {
+    (void)self; (void)errorCode; (void)id;
+    return S_OK;
+}
+
+// wvAddUserScript registers a script that runs at document creation on every
+// navigation, so JS-to-Go bindings persist across page loads. Must run on the
+// UI thread (called during Bind, before the message loop spins on a worker).
+void wvAddUserScript(const char *script) {
+    if (!g_webview) return;
+    wchar_t *wscript = utf8_to_utf16(script);
+    if (!wscript) return;
+
+    static ICompletedHandlerVtbl2 vtbl = {
+        { handler2_QueryInterface, handler2_AddRef, handler2_Release },
+        addScriptHandler_Invoke
+    };
+    static ICompletedHandler2 handler = { &vtbl, 1 };
+
+    wv2_add_script_on_document_created(g_webview, wscript, (IUnknown *)&handler);
+    free(wscript);
 }
 
 void wvReload() {

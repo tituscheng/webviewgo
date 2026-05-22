@@ -106,9 +106,6 @@ func goTypeToTS(t reflect.Type) string {
 	case reflect.Struct:
 		return goStructToTS(t)
 	case reflect.Interface:
-		if t.NumMethod() == 0 {
-			return "any"
-		}
 		return "any"
 	case reflect.Ptr:
 		return goTypeToTS(t.Elem())
@@ -135,7 +132,10 @@ func goStructToTS(t reflect.Type) string {
 		jsonTag := field.Tag.Get("json")
 		if jsonTag != "" {
 			parts := strings.Split(jsonTag, ",")
-			if parts[0] != "" && parts[0] != "-" {
+			if parts[0] == "-" {
+				continue // field excluded from JSON, so omit it from the TS type
+			}
+			if parts[0] != "" {
 				name = parts[0]
 			}
 		}

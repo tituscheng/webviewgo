@@ -73,16 +73,20 @@ func (m *Manager) SaveSession(sessionID string) error {
 	return nil
 }
 
-// LoadSession loads cookies for a session from the store.
+// LoadSession makes sessionID the active session and pushes its cookies
+// (plus shared persistent cookies) to the native store. Subsequent writes
+// flush against this session.
 func (m *Manager) LoadSession(sessionID string) error {
 	ctx := context.Background()
-	cookies, err := m.store.All(ctx, sessionID)
+	m.mu.Lock()
+	m.sessionID = sessionID
+	onSync := m.onSync
+	m.mu.Unlock()
+
+	cookies, err := m.store.SyncSet(ctx, sessionID)
 	if err != nil {
 		return fmt.Errorf("cookie: load session: %w", err)
 	}
-	m.mu.RLock()
-	onSync := m.onSync
-	m.mu.RUnlock()
 	if onSync != nil {
 		return onSync(cookies)
 	}
@@ -109,15 +113,18 @@ func (m *Manager) SetSyncCallback(fn func([]types.Cookie) error) {
 	m.onSync = fn
 }
 
-// flush calls the sync callback if registered.
+// flush calls the sync callback if registered. It pushes only the active
+// session's cookies plus shared persistent cookies, never other sessions',
+// so session isolation is preserved in the native cookie store.
 func (m *Manager) flush(ctx context.Context) error {
 	m.mu.RLock()
 	onSync := m.onSync
+	sid := m.sessionID
 	m.mu.RUnlock()
 	if onSync == nil {
 		return nil
 	}
-	cookies, err := m.store.All(ctx, "")
+	cookies, err := m.store.SyncSet(ctx, sid)
 	if err != nil {
 		return fmt.Errorf("cookie: flush: %w", err)
 	}

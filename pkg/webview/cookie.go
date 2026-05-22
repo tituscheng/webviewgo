@@ -21,17 +21,8 @@ const (
 // CookieManager controls cookie storage and synchronization.
 type CookieManager = types.CookieManager
 
-// Ensure concrete implementations satisfy the interface.
-var _ CookieManager = (func() CookieManager {
-	// This is a compile-time check placeholder.
-	return nil
-})()
-
-// Ensure Jar satisfies http.CookieJar.
-var _ http.CookieJar = (func() http.CookieJar {
-	// Placeholder; real check is in webview.go init.
-	return nil
-})()
+// Concrete-type compile-time interface checks live in webview.go, which can
+// import the internal cookie package.
 
 // CookieToHTTP converts a webview.Cookie to *http.Cookie.
 func CookieToHTTP(c Cookie) *http.Cookie {

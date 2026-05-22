@@ -2,7 +2,6 @@ package core
 
 import (
 	"log/slog"
-	"net/url"
 	"sync"
 	"sync/atomic"
 
@@ -80,11 +79,4 @@ func logOpts(opts types.Options) *slog.Logger {
 		return opts.Logger
 	}
 	return slog.Default()
-}
-
-func resolveProxy(u *url.URL) string {
-	if u == nil {
-		return ""
-	}
-	return u.String()
 }

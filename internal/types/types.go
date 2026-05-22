@@ -21,11 +21,18 @@ type Options struct {
 	Transparent bool
 	Center      bool
 	UserAgent   string
-	Proxy       *url.URL
-	Devtools    bool
-	Headless    bool
-	Logger      *slog.Logger
-	OnDrop      func(files []string)
+	// Proxy configures an upstream HTTP proxy for the webview's network stack.
+	//
+	// Not yet implemented by any backend; setting it currently has no effect.
+	Proxy    *url.URL
+	Devtools bool
+	Headless bool
+	Logger   *slog.Logger
+	// OnDrop is invoked when files are dropped onto the window.
+	//
+	// Not yet implemented by any backend; the callback is currently never
+	// invoked.
+	OnDrop func(files []string)
 }
 
 // Cookie represents an HTTP cookie with session isolation.
@@ -38,8 +45,12 @@ type Cookie struct {
 	Expires   time.Time
 	Secure    bool
 	HTTPOnly  bool
-	SameSite  SameSite
-	Raw       string
+	// HostOnly marks a cookie that may only be sent to the exact host that set
+	// it (i.e. the cookie was set without an explicit Domain attribute). When
+	// false the cookie is a domain cookie and also matches subdomains.
+	HostOnly bool
+	SameSite SameSite
+	Raw      string
 }
 
 // SameSite describes the SameSite attribute.
@@ -168,6 +179,7 @@ func DefaultOptions() Options {
 		Width:     1024,
 		Height:    768,
 		Resizable: true,
+		Center:    true,
 		Profile:   "default",
 		Logger:    slog.Default(),
 	}

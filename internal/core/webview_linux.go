@@ -133,6 +133,18 @@ static void evalOnMainThread(WebKitWebView *webView, const char *script) {
     data->script = g_strdup(script);
     g_idle_add(runJsIdle, data);
 }
+
+// addUserScript installs a script that runs at document start on every page
+// load (current and future navigations), so JS-to-Go bindings survive
+// navigation instead of being defined once via a transient eval.
+static void addUserScript(WebKitWebView *webView, const char *source) {
+    WebKitUserContentManager *cm = webkit_web_view_get_user_content_manager(webView);
+    WebKitUserScript *script = webkit_user_script_new(source,
+        WEBKIT_USER_CONTENT_INJECT_ALL_FRAMES,
+        WEBKIT_USER_SCRIPT_INJECT_AT_DOCUMENT_START, NULL, NULL);
+    webkit_user_content_manager_add_script(cm, script);
+    webkit_user_script_unref(script);
+}
 */
 import "C"
 import (
@@ -201,8 +213,10 @@ func newNative(opts types.Options) (Platform, error) {
 	gtkWindow := (*C.GtkWindow)(window)
 	C.gtk_container_add((*C.GtkContainer)(unsafe.Pointer(gtkWindow)), (*C.GtkWidget)(webView))
 
-	C.g_signal_connect((*C.GObject)(unsafe.Pointer(gtkWindow)), C.CString("destroy"),
+	destroySignal := C.CString("destroy")
+	C.g_signal_connect((*C.GObject)(unsafe.Pointer(gtkWindow)), destroySignal,
 		C.GCallback(C.onDestroy), C.gpointer(wv.handle))
+	C.free(unsafe.Pointer(destroySignal))
 
 	return wv, nil
 }
@@ -305,6 +319,11 @@ func (w *linuxWebView) Bind(name string, fn func(args []any) (any, error)) error
 		});
 	};
 `, name, name)
+	// Install as a document-start user script so the binding persists across
+	// navigations, and eval once so it is available on the current document.
+	cs := C.CString(script)
+	C.addUserScript((*C.WebKitWebView)(w.webView), cs)
+	C.free(unsafe.Pointer(cs))
 	_ = w.Eval(script)
 	return nil
 }

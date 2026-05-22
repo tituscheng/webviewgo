@@ -18,6 +18,30 @@ import (
 // The return value is JSON-marshaled; errors become promise rejections.
 type BridgeFn func(args []any) (any, error)
 
+// convertArg unmarshals args[i] into a value of type pt, returning the zero
+// value when the argument is missing.
+func convertArg(pt reflect.Type, args []any, i int) (reflect.Value, error) {
+	if i >= len(args) {
+		return reflect.Zero(pt), nil
+	}
+	pv := reflect.New(pt).Interface()
+	if raw, ok := args[i].(json.RawMessage); ok {
+		if err := json.Unmarshal(raw, pv); err != nil {
+			return reflect.Value{}, fmt.Errorf("js: unmarshal arg %d: %w", i, err)
+		}
+	} else {
+		// Round-trip through JSON to coerce the decoded any into pt.
+		b, err := json.Marshal(args[i])
+		if err != nil {
+			return reflect.Value{}, fmt.Errorf("js: marshal arg %d: %w", i, err)
+		}
+		if err := json.Unmarshal(b, pv); err != nil {
+			return reflect.Value{}, fmt.Errorf("js: unmarshal arg %d: %w", i, err)
+		}
+	}
+	return reflect.ValueOf(pv).Elem(), nil
+}
+
 // Wrap turns any suitable function into a BridgeFn.
 func Wrap(fn any) (BridgeFn, error) {
 	v := reflect.ValueOf(fn)
@@ -42,34 +66,44 @@ func Wrap(fn any) (BridgeFn, error) {
 	}
 
 	return func(args []any) (any, error) {
-		in := make([]reflect.Value, t.NumIn())
-		for i := 0; i < t.NumIn(); i++ {
-			if i >= len(args) {
-				// Use zero value for missing args
-				in[i] = reflect.Zero(t.In(i))
-				continue
-			}
-			arg := args[i]
-			pt := t.In(i)
-			pv := reflect.New(pt).Interface()
-			if raw, ok := arg.(json.RawMessage); ok {
-				if err := json.Unmarshal(raw, pv); err != nil {
-					return nil, fmt.Errorf("js: unmarshal arg %d: %w", i, err)
-				}
-			} else {
-				// Try JSON round-trip for conversion
-				b, err := json.Marshal(arg)
-				if err != nil {
-					return nil, fmt.Errorf("js: marshal arg %d: %w", i, err)
-				}
-				if err := json.Unmarshal(b, pv); err != nil {
-					return nil, fmt.Errorf("js: unmarshal arg %d: %w", i, err)
-				}
-			}
-			in[i] = reflect.ValueOf(pv).Elem()
-		}
+		numIn := t.NumIn()
+		var in []reflect.Value
+		var out []reflect.Value
 
-		out := v.Call(in)
+		if t.IsVariadic() {
+			// Last parameter is a slice ([]T); fill fixed params then spread the
+			// remaining args into the variadic slice and call via CallSlice.
+			fixed := numIn - 1
+			in = make([]reflect.Value, numIn)
+			for i := 0; i < fixed; i++ {
+				val, err := convertArg(t.In(i), args, i)
+				if err != nil {
+					return nil, err
+				}
+				in[i] = val
+			}
+			elemType := t.In(fixed).Elem()
+			variadic := reflect.MakeSlice(t.In(fixed), 0, 0)
+			for i := fixed; i < len(args); i++ {
+				val, err := convertArg(elemType, args, i)
+				if err != nil {
+					return nil, err
+				}
+				variadic = reflect.Append(variadic, val)
+			}
+			in[fixed] = variadic
+			out = v.CallSlice(in)
+		} else {
+			in = make([]reflect.Value, numIn)
+			for i := 0; i < numIn; i++ {
+				val, err := convertArg(t.In(i), args, i)
+				if err != nil {
+					return nil, err
+				}
+				in[i] = val
+			}
+			out = v.Call(in)
+		}
 		switch len(out) {
 		case 0:
 			return nil, nil

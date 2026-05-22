@@ -54,14 +54,14 @@ type WebView interface {
 
 // webview is the concrete implementation of WebView.
 type webview struct {
-	platform        core.Platform
-	cm              types.CookieManager
-	logger          *slog.Logger
-	mu              sync.RWMutex
-	ctx             context.Context
-	cancel          context.CancelFunc
-	userAgent       string
-	uaInjected      bool
+	platform   core.Platform
+	cm         types.CookieManager
+	logger     *slog.Logger
+	mu         sync.RWMutex
+	ctx        context.Context
+	cancel     context.CancelFunc
+	userAgent  string
+	uaInjected bool
 }
 
 // New creates a WebView with the given options.
@@ -168,26 +168,54 @@ func (w *webview) LoadHTML(html, baseURL string) error {
 }
 
 func (w *webview) injectUserAgent() {
+	w.mu.Lock()
 	if w.userAgent == "" || w.uaInjected {
+		w.mu.Unlock()
 		return
 	}
 	w.uaInjected = true
-	script := fmt.Sprintf(`navigator.__defineGetter__('userAgent', function(){ return %q; });`, w.userAgent)
+	ua := w.userAgent
+	w.mu.Unlock()
+
+	script := fmt.Sprintf(`navigator.__defineGetter__('userAgent', function(){ return %q; });`, ua)
 	if err := w.platform.Eval(script); err != nil {
 		w.logger.Warn("user-agent fallback injection failed", "error", err)
 	}
 }
-func (w *webview) Reload()                              { w.platform.Reload() }
-func (w *webview) Back()                                { w.platform.Back() }
-func (w *webview) Forward()                             { w.platform.Forward() }
-func (w *webview) Eval(script string) error             { return w.platform.Eval(script) }
+func (w *webview) Reload()                  { w.platform.Reload() }
+func (w *webview) Back()                    { w.platform.Back() }
+func (w *webview) Forward()                 { w.platform.Forward() }
+func (w *webview) Eval(script string) error { return w.platform.Eval(script) }
 
 func (w *webview) Bind(name string, fn any) error {
+	if !isValidJSIdentifier(name) {
+		return fmt.Errorf("webview: Bind %q: name must be a valid JavaScript identifier", name)
+	}
 	bridge, err := js.Wrap(fn)
 	if err != nil {
 		return fmt.Errorf("webview: Bind %q: %w", name, err)
 	}
 	return w.platform.Bind(name, bridge)
+}
+
+// isValidJSIdentifier reports whether name is a safe top-level identifier to
+// interpolate into the injected bridge script. This prevents script injection
+// through the binding name (which is otherwise written verbatim into JS).
+func isValidJSIdentifier(name string) bool {
+	if name == "" {
+		return false
+	}
+	for i, r := range name {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r == '_', r == '$':
+			// always allowed
+		case (r >= '0' && r <= '9') && i > 0:
+			// digits allowed, but not as the first character
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 func (w *webview) CookieManager() CookieManager {
@@ -218,11 +246,4 @@ var _ WebView = (*webview)(nil)
 
 // Compile-time interface checks for internal wiring.
 var _ CookieManager = (*cookie.Manager)(nil)
-var _ http.CookieJar = (func() http.CookieJar {
-	m, _ := cookie.NewManager(":memory:")
-	if m != nil {
-		defer m.Close()
-		return m.AsJar()
-	}
-	return nil
-})()
+var _ http.CookieJar = (*cookie.Jar)(nil)

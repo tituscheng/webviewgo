@@ -175,3 +175,25 @@ func TestWebView_Dialogs(t *testing.T) {
 		t.Fatal("expected error for MessageDialog in headless")
 	}
 }
+
+func TestBind_RejectsInvalidName(t *testing.T) {
+	wv, err := New(Options{Headless: true, AppName: "webviewgo-test-bind"})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer wv.Destroy()
+
+	valid := []string{"foo", "_bar", "$baz", "fn123"}
+	for _, name := range valid {
+		if err := wv.Bind(name, func() error { return nil }); err != nil {
+			t.Errorf("Bind(%q) unexpectedly rejected: %v", name, err)
+		}
+	}
+
+	invalid := []string{"", "1foo", "a.b", "x;evil()", "win dow", "a-b"}
+	for _, name := range invalid {
+		if err := wv.Bind(name, func() error { return nil }); err == nil {
+			t.Errorf("Bind(%q) should have been rejected", name)
+		}
+	}
+}
