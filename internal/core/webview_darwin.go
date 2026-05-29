@@ -29,6 +29,40 @@ static void activateApp(void) {
     [[NSApplication sharedApplication] activateIgnoringOtherApps:YES];
 }
 
+// installEditMenu builds a standard Edit menu (Cut/Copy/Paste/Select All) wired
+// to the default responder-chain selectors and assigns it as the application's
+// main menu. Without a main menu the usual Cmd-X/C/V/A key equivalents never
+// reach the focused WKWebView, so clipboard and Select All appear broken. The
+// selectors resolve through the responder chain to the first responder (the web
+// view). Idempotent: only the first call installs the menu.
+static void installEditMenu(void) {
+    static BOOL installed = NO;
+    if (installed) {
+        return;
+    }
+    installed = YES;
+
+    NSApplication *app = [NSApplication sharedApplication];
+
+    NSMenu *mainMenu = [[[NSMenu alloc] initWithTitle:@""] autorelease];
+
+    NSMenuItem *editItem = [[[NSMenuItem alloc] initWithTitle:@"Edit"
+                                                       action:NULL
+                                                keyEquivalent:@""] autorelease];
+    NSMenu *editMenu = [[[NSMenu alloc] initWithTitle:@"Edit"] autorelease];
+
+    // Key equivalents default to the Command modifier.
+    [editMenu addItemWithTitle:@"Cut" action:@selector(cut:) keyEquivalent:@"x"];
+    [editMenu addItemWithTitle:@"Copy" action:@selector(copy:) keyEquivalent:@"c"];
+    [editMenu addItemWithTitle:@"Paste" action:@selector(paste:) keyEquivalent:@"v"];
+    [editMenu addItem:[NSMenuItem separatorItem]];
+    [editMenu addItemWithTitle:@"Select All" action:@selector(selectAll:) keyEquivalent:@"a"];
+
+    [editItem setSubmenu:editMenu];
+    [mainMenu addItem:editItem];
+    [app setMainMenu:mainMenu];
+}
+
 static void deactivateApp(void) {
     [[NSApplication sharedApplication] deactivate];
 }
@@ -302,6 +336,7 @@ func init() {
 
 func newNative(opts types.Options) (Platform, error) {
 	C.setActivationPolicyRegular()
+	C.installEditMenu()
 	C.activateApp()
 
 	title := C.CString(opts.Title)

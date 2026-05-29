@@ -12,8 +12,8 @@ import (
 	"time"
 
 	"github.com/tituscheng/webviewgo/internal/types"
-	"modernc.org/sqlite"
-	_ "modernc.org/sqlite" // driver
+	sqlite "github.com/glebarez/go-sqlite"
+	_ "github.com/glebarez/go-sqlite" // driver; shared with glebarez/gorm consumers
 )
 
 //go:embed schema/*.sql
