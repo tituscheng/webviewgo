@@ -82,8 +82,9 @@ static int messageDialog(GtkWindow *parent, const char *title, const char *messa
     switch (buttons) {
         case 1: btnType = GTK_BUTTONS_OK_CANCEL; break;
         case 2: btnType = GTK_BUTTONS_YES_NO; break;
-        case 3: btnType = GTK_BUTTONS_YES_NO; break; // GTK has no native YesNoCancel
+        case 3: btnType = GTK_BUTTONS_NONE; break;
         case 4: btnType = GTK_BUTTONS_OK_CANCEL; break;
+        case 5: btnType = GTK_BUTTONS_NONE; break;
         default: btnType = GTK_BUTTONS_OK; break;
     }
 
@@ -98,6 +99,19 @@ static int messageDialog(GtkWindow *parent, const char *title, const char *messa
     if (title) {
         gtk_window_set_title(GTK_WINDOW(dialog), title);
     }
+    if (buttons == 3) {
+        gtk_dialog_add_buttons(GTK_DIALOG(dialog),
+            "_Yes", GTK_RESPONSE_YES,
+            "_No", GTK_RESPONSE_NO,
+            "_Cancel", GTK_RESPONSE_CANCEL,
+            NULL);
+    } else if (buttons == 5) {
+        gtk_dialog_add_buttons(GTK_DIALOG(dialog),
+            "_Abort", GTK_RESPONSE_REJECT,
+            "_Retry", GTK_RESPONSE_ACCEPT,
+            "_Ignore", GTK_RESPONSE_CLOSE,
+            NULL);
+    }
 
     int response = gtk_dialog_run(GTK_DIALOG(dialog));
     gtk_widget_destroy(dialog);
@@ -105,8 +119,15 @@ static int messageDialog(GtkWindow *parent, const char *title, const char *messa
     switch (buttons) {
         case 1: return (response == GTK_RESPONSE_OK) ? 1 : 0;
         case 2: return (response == GTK_RESPONSE_YES) ? 2 : 3;
-        case 3: return (response == GTK_RESPONSE_YES) ? 2 : 3;
+        case 3:
+            if (response == GTK_RESPONSE_YES) return 2;
+            if (response == GTK_RESPONSE_NO) return 3;
+            return 0;
         case 4: return (response == GTK_RESPONSE_OK) ? 5 : 0;
+        case 5:
+            if (response == GTK_RESPONSE_REJECT) return 4;
+            if (response == GTK_RESPONSE_ACCEPT) return 5;
+            return 6;
         default: return (response == GTK_RESPONSE_OK) ? 1 : 0;
     }
 }
@@ -134,7 +155,7 @@ func (w *linuxWebView) OpenDialog(opts types.OpenDialogOptions) ([]string, error
 	var count C.int
 	paths := C.openDialog(
 		(*C.GtkWindow)(w.window),
-		boolInt(opts.AllowFiles), boolInt(opts.AllowDirs), boolInt(opts.AllowMultiple),
+		cBool(opts.AllowFiles), cBool(opts.AllowDirs), cBool(opts.AllowMultiple),
 		title, dir, &count,
 	)
 	if paths == nil {

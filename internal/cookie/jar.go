@@ -2,10 +2,12 @@ package cookie
 
 import (
 	"context"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/tituscheng/webviewgo/internal/types"
 )
@@ -15,6 +17,7 @@ type Jar struct {
 	store     *Store
 	sessionID string
 	mu        sync.RWMutex
+	flushFn   func() error
 }
 
 // NewJar creates a new Jar for the given store and optional session.
@@ -27,16 +30,33 @@ func (j *Jar) SetCookies(u *url.URL, cookies []*http.Cookie) {
 	ctx := context.Background()
 	sid := j.SessionID()
 	host := canonicalHost(u.Hostname())
+	changed := false
 	for _, hc := range cookies {
-		c := fromHTTP(hc, sid)
-		// A cookie with no Domain attribute is host-only: it may only be sent
-		// back to the exact host that set it.
-		c.HostOnly = hc.Domain == ""
-		c.Domain = canonicalHost(effectiveDomain(host, hc.Domain))
-		if c.Path == "" {
-			c.Path = "/"
+		if hc == nil {
+			continue
 		}
+		path := hc.Path
+		if path == "" {
+			path = defaultPath(u.Path)
+		}
+		domain, hostOnly, ok := cookieDomainForHost(host, hc.Domain)
+		if !ok {
+			continue
+		}
+		if hc.MaxAge < 0 {
+			_ = j.store.DeleteCookie(ctx, sid, hc.Name, domain, path)
+			changed = true
+			continue
+		}
+		c := fromHTTP(hc, sid)
+		c.HostOnly = hostOnly
+		c.Domain = domain
+		c.Path = path
 		_ = j.store.SetCookie(ctx, c)
+		changed = true
+	}
+	if changed {
+		j.flush()
 	}
 }
 
@@ -79,7 +99,10 @@ func fromHTTP(c *http.Cookie, sessionID string) types.Cookie {
 		HTTPOnly:  c.HttpOnly,
 		Raw:       c.Raw,
 	}
-	if !c.Expires.IsZero() {
+	switch {
+	case c.MaxAge > 0:
+		wc.Expires = time.Now().Add(time.Duration(c.MaxAge) * time.Second)
+	case !c.Expires.IsZero():
 		wc.Expires = c.Expires
 	}
 	switch c.SameSite {
@@ -89,6 +112,8 @@ func fromHTTP(c *http.Cookie, sessionID string) types.Cookie {
 		wc.SameSite = types.SameSiteStrict
 	case http.SameSiteNoneMode:
 		wc.SameSite = types.SameSiteNone
+	default:
+		wc.SameSite = types.SameSiteDefault
 	}
 	return wc
 }
@@ -97,12 +122,14 @@ func toHTTP(c types.Cookie) *http.Cookie {
 	hc := &http.Cookie{
 		Name:     c.Name,
 		Value:    c.Value,
-		Domain:   c.Domain,
 		Path:     c.Path,
 		Expires:  c.Expires,
 		Secure:   c.Secure,
 		HttpOnly: c.HTTPOnly,
 		Raw:      c.Raw,
+	}
+	if !c.HostOnly {
+		hc.Domain = c.Domain
 	}
 	switch c.SameSite {
 	case types.SameSiteLax:
@@ -115,11 +142,51 @@ func toHTTP(c types.Cookie) *http.Cookie {
 	return hc
 }
 
-func effectiveDomain(hostname, cookieDomain string) string {
-	if cookieDomain != "" {
-		return cookieDomain
+func (j *Jar) flush() {
+	if j.flushFn == nil {
+		return
 	}
-	return hostname
+	_ = j.flushFn()
+}
+
+// cookieDomainForHost applies RFC 6265 §5.3 Domain-attribute checks. ok is
+// false when the cookie must be ignored.
+func cookieDomainForHost(host, cookieDomain string) (domain string, hostOnly, ok bool) {
+	if cookieDomain == "" {
+		return host, true, host != ""
+	}
+	domain = canonicalHost(cookieDomain)
+	if domain == "" {
+		return "", false, false
+	}
+	if net.ParseIP(host) != nil {
+		// IP hosts only accept an exact-match Domain, otherwise host-only.
+		if domain != host {
+			return "", false, false
+		}
+		return host, true, true
+	}
+	if !domainMatch(host, domain, false) {
+		return "", false, false
+	}
+	// Heuristic public-suffix guard without an extra dependency: a Domain
+	// with no dot (e.g. "com") would otherwise match every host in that TLD.
+	if domain != host && !strings.Contains(domain, ".") {
+		return "", false, false
+	}
+	return domain, false, true
+}
+
+// defaultPath is RFC 6265 §5.1.4: the directory of the request URI, not "/".
+func defaultPath(reqPath string) string {
+	if reqPath == "" || reqPath[0] != '/' {
+		return "/"
+	}
+	i := strings.LastIndex(reqPath, "/")
+	if i <= 0 {
+		return "/"
+	}
+	return reqPath[:i]
 }
 
 // canonicalHost normalises a host or cookie domain for comparison: lower-cased

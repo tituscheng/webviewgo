@@ -2,6 +2,7 @@ package webview
 
 import (
 	"net/http"
+	"time"
 
 	"github.com/tituscheng/webviewgo/internal/types"
 )
@@ -13,9 +14,10 @@ type Cookie = types.Cookie
 type SameSite = types.SameSite
 
 const (
-	SameSiteNone   = types.SameSiteNone
-	SameSiteLax    = types.SameSiteLax
-	SameSiteStrict = types.SameSiteStrict
+	SameSiteDefault = types.SameSiteDefault
+	SameSiteLax     = types.SameSiteLax
+	SameSiteStrict  = types.SameSiteStrict
+	SameSiteNone    = types.SameSiteNone
 )
 
 // CookieManager controls cookie storage and synchronization.
@@ -29,12 +31,14 @@ func CookieToHTTP(c Cookie) *http.Cookie {
 	hc := &http.Cookie{
 		Name:     c.Name,
 		Value:    c.Value,
-		Domain:   c.Domain,
 		Path:     c.Path,
 		Expires:  c.Expires,
 		Secure:   c.Secure,
 		HttpOnly: c.HTTPOnly,
 		Raw:      c.Raw,
+	}
+	if !c.HostOnly {
+		hc.Domain = c.Domain
 	}
 	switch c.SameSite {
 	case SameSiteLax:
@@ -57,9 +61,13 @@ func HTTPToCookie(c *http.Cookie, sessionID string) Cookie {
 		Path:      c.Path,
 		Secure:    c.Secure,
 		HTTPOnly:  c.HttpOnly,
+		HostOnly:  c.Domain == "",
 		Raw:       c.Raw,
 	}
-	if !c.Expires.IsZero() {
+	switch {
+	case c.MaxAge > 0:
+		wc.Expires = time.Now().Add(time.Duration(c.MaxAge) * time.Second)
+	case !c.Expires.IsZero():
 		wc.Expires = c.Expires
 	}
 	switch c.SameSite {
@@ -69,6 +77,8 @@ func HTTPToCookie(c *http.Cookie, sessionID string) Cookie {
 		wc.SameSite = SameSiteStrict
 	case http.SameSiteNoneMode:
 		wc.SameSite = SameSiteNone
+	default:
+		wc.SameSite = SameSiteDefault
 	}
 	return wc
 }

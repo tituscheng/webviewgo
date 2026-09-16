@@ -46,18 +46,36 @@ static NSMutableDictionary *parseHeaders(const char *headers) {
 }
 
 - (void)webView:(WKWebView *)webView startURLSchemeTask:(id<WKURLSchemeTask>)urlSchemeTask {
-    if (!schemeTaskMap) {
-        schemeTaskMap = [NSMutableDictionary dictionary];
-    }
-    if (!schemeTaskQueue) {
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        schemeTaskMap = [[NSMutableDictionary alloc] init];
         schemeTaskQueue = dispatch_queue_create("webviewgo.schemeTask", DISPATCH_QUEUE_SERIAL);
-    }
+    });
 
     NSURLRequest *req = urlSchemeTask.request;
     NSString *url = req.URL.absoluteString ?: @"";
     NSString *method = req.HTTPMethod ?: @"GET";
     NSString *headers = serializeHeaders(req.allHTTPHeaderFields);
-    NSData *bodyData = req.HTTPBody ?: [NSData data];
+    NSData *bodyData = req.HTTPBody;
+    if (!bodyData && req.HTTPBodyStream) {
+        NSInputStream *stream = req.HTTPBodyStream;
+        [stream open];
+        NSMutableData *buf = [NSMutableData data];
+        uint8_t chunk[4096];
+        const NSUInteger cap = 100u * 1024u * 1024u;
+        while ([stream hasBytesAvailable] && buf.length < cap) {
+            NSInteger n = [stream read:chunk maxLength:sizeof(chunk)];
+            if (n <= 0) {
+                break;
+            }
+            [buf appendBytes:chunk length:(NSUInteger)n];
+        }
+        [stream close];
+        bodyData = buf;
+    }
+    if (!bodyData) {
+        bodyData = [NSData data];
+    }
 
     static uintptr_t reqSeq = 1;
     uintptr_t reqHandle = reqSeq++;

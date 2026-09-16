@@ -34,7 +34,7 @@ static void ensureLinuxSchemeReqMap(void) {
 static void storeLinuxSchemeReq(uintptr_t reqHandle, WebKitURISchemeRequest *request) {
     ensureLinuxSchemeReqMap();
     LinuxSchemeReq *entry = g_new(LinuxSchemeReq, 1);
-    entry->request = request;
+    entry->request = g_object_ref(request);
     g_mutex_lock(&linuxSchemeReqMutex);
     g_hash_table_insert(linuxSchemeReqMap, (gpointer)(uintptr_t)reqHandle, entry);
     g_mutex_unlock(&linuxSchemeReqMutex);
@@ -42,13 +42,16 @@ static void storeLinuxSchemeReq(uintptr_t reqHandle, WebKitURISchemeRequest *req
 
 static WebKitURISchemeRequest *takeLinuxSchemeReq(uintptr_t reqHandle) {
     ensureLinuxSchemeReqMap();
+    WebKitURISchemeRequest *req = NULL;
     g_mutex_lock(&linuxSchemeReqMutex);
     LinuxSchemeReq *entry = g_hash_table_lookup(linuxSchemeReqMap, (gpointer)(uintptr_t)reqHandle);
     if (entry) {
+        req = entry->request;
+        entry->request = NULL;
         g_hash_table_remove(linuxSchemeReqMap, (gpointer)(uintptr_t)reqHandle);
     }
     g_mutex_unlock(&linuxSchemeReqMutex);
-    return entry ? entry->request : NULL;
+    return req;
 }
 
 static void appendHeader(const char *name, const char *value, gpointer user_data) {
@@ -58,8 +61,7 @@ static void appendHeader(const char *name, const char *value, gpointer user_data
 
 static void linuxUriSchemeCallback(WebKitURISchemeRequest *request, gpointer user_data) {
     LinuxSchemeReg *reg = (LinuxSchemeReg *)user_data;
-    GUri *uri = webkit_uri_scheme_request_get_uri(request);
-    gchar *url = g_uri_to_string(uri);
+    const gchar *url = webkit_uri_scheme_request_get_uri(request);
     const gchar *method = webkit_uri_scheme_request_get_http_method(request);
     if (!method) {
         method = "GET";
@@ -76,7 +78,7 @@ static void linuxUriSchemeCallback(WebKitURISchemeRequest *request, gpointer use
     GInputStream *bodyStream = webkit_uri_scheme_request_get_http_body(request);
     if (bodyStream) {
         GError *err = NULL;
-        bodyBytes = g_input_stream_read_bytes(bodyStream, G_MAXSIZE, NULL, &err);
+        bodyBytes = g_input_stream_read_bytes(bodyStream, 100 * 1024 * 1024, NULL, &err);
         if (err) {
             g_error_free(err);
             bodyBytes = NULL;
@@ -89,8 +91,8 @@ static void linuxUriSchemeCallback(WebKitURISchemeRequest *request, gpointer use
     uintptr_t reqHandle = reqSeq++;
     storeLinuxSchemeReq(reqHandle, request);
 
-    goLinuxProtocolHandler(reg->handle, reg->scheme, url, (char *)method,
-                           headerBlob->str,
+    goLinuxProtocolHandler(reg->handle, reg->scheme, (char *)(url ? url : ""),
+                           (char *)method, headerBlob->str,
                            bodyBytes ? (void *)g_bytes_get_data(bodyBytes, NULL) : NULL,
                            (int)bodyLen, reqHandle);
 
@@ -98,7 +100,6 @@ static void linuxUriSchemeCallback(WebKitURISchemeRequest *request, gpointer use
         g_bytes_unref(bodyBytes);
     }
     g_string_free(headerBlob, TRUE);
-    g_free(url);
 }
 
 static void freeLinuxSchemeReg(gpointer data) {
@@ -116,18 +117,27 @@ static void registerLinuxScheme(WebKitWebView *webView, const char *scheme, uint
                                            reg, freeLinuxSchemeReg);
 }
 
-void deliverLinuxSchemeResponse(uintptr_t reqHandle, int statusCode, char *headers,
-                                void *body, int bodyLen) {
-    WebKitURISchemeRequest *request = takeLinuxSchemeReq(reqHandle);
+typedef struct {
+    uintptr_t reqHandle;
+    int statusCode;
+    char *headers;
+    void *body;
+    int bodyLen;
+} LinuxSchemeDelivery;
+
+static gboolean deliverLinuxSchemeResponseIdle(gpointer user_data) {
+    LinuxSchemeDelivery *d = (LinuxSchemeDelivery *)user_data;
+    WebKitURISchemeRequest *request = takeLinuxSchemeReq(d->reqHandle);
     if (!request) {
-        return;
+        g_free(d->headers);
+        g_free(d->body);
+        g_free(d);
+        return G_SOURCE_REMOVE;
     }
 
     SoupMessageHeaders *respHeaders = soup_message_headers_new(SOUP_MESSAGE_HEADERS_RESPONSE);
-    soup_message_headers_set_status(respHeaders, (SoupStatus)statusCode);
-
-    if (headers && headers[0]) {
-        char *blob = g_strdup(headers);
+    if (d->headers && d->headers[0]) {
+        char *blob = g_strdup(d->headers);
         char *line = blob;
         while (line && *line) {
             char *nl = strchr(line, '\n');
@@ -146,23 +156,46 @@ void deliverLinuxSchemeResponse(uintptr_t reqHandle, int statusCode, char *heade
         }
         g_free(blob);
     }
-
     if (!soup_message_headers_get_one(respHeaders, "Content-Type")) {
         soup_message_headers_append(respHeaders, "Content-Type", "application/octet-stream");
     }
 
+    gint64 streamLen = 0;
     GInputStream *stream = NULL;
-    if (body && bodyLen > 0) {
-        GBytes *bytes = g_bytes_new(body, (gsize)bodyLen);
-        stream = g_memory_input_stream_new_from_bytes(bytes);
-        g_bytes_unref(bytes);
+    if (d->body && d->bodyLen > 0) {
+        stream = g_memory_input_stream_new_from_data(d->body, (gsize)d->bodyLen, g_free);
+        d->body = NULL;
+        streamLen = d->bodyLen;
     } else {
         stream = g_memory_input_stream_new_from_data("", 0, NULL);
     }
 
-    webkit_uri_scheme_request_finish_with_headers(request, respHeaders, stream);
+    int status = d->statusCode > 0 ? d->statusCode : 200;
+    WebKitURISchemeResponse *resp = webkit_uri_scheme_response_new(stream, streamLen);
+    webkit_uri_scheme_response_set_status(resp, (guint)status, NULL);
+    webkit_uri_scheme_response_set_http_headers(resp, respHeaders);
+    webkit_uri_scheme_request_finish_with_response(request, resp);
+    g_object_unref(resp);
     g_object_unref(stream);
-    soup_message_headers_free(respHeaders);
+    g_object_unref(request);
+
+    g_free(d->headers);
+    g_free(d);
+    return G_SOURCE_REMOVE;
+}
+
+void deliverLinuxSchemeResponse(uintptr_t reqHandle, int statusCode, char *headers,
+                                void *body, int bodyLen) {
+    LinuxSchemeDelivery *d = g_new0(LinuxSchemeDelivery, 1);
+    d->reqHandle = reqHandle;
+    d->statusCode = statusCode;
+    d->headers = g_strdup(headers ? headers : "");
+    if (body && bodyLen > 0) {
+        d->body = g_malloc((gsize)bodyLen);
+        memcpy(d->body, body, (size_t)bodyLen);
+        d->bodyLen = bodyLen;
+    }
+    g_idle_add(deliverLinuxSchemeResponseIdle, d);
 }
 */
 import "C"
@@ -216,6 +249,7 @@ func goLinuxProtocolHandler(handle C.uintptr_t, scheme *C.char, url *C.char, met
 	headers *C.char, body unsafe.Pointer, bodyLen C.int, reqHandle C.uintptr_t) {
 	wv, ok := getPlatform(uintptr(handle))
 	if !ok {
+		linuxDeliverText(reqHandle, http.StatusServiceUnavailable, "Service Unavailable")
 		return
 	}
 	lw := wv.(*linuxWebView)

@@ -89,7 +89,7 @@ func TestStore_DeleteCookie(t *testing.T) {
 	if err := s.SetCookie(ctx, c); err != nil {
 		t.Fatalf("set cookie: %v", err)
 	}
-	if err := s.DeleteCookie(ctx, "del", "del.com", "/"); err != nil {
+	if err := s.DeleteCookie(ctx, "", "del", "del.com", "/"); err != nil {
 		t.Fatalf("delete cookie: %v", err)
 	}
 	cookies, err := s.GetCookies(ctx, "https://del.com/", "")

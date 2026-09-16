@@ -45,9 +45,15 @@ func bindingToTS(binding Binding) (string, error) {
 		return "", fmt.Errorf("binding value is not a function")
 	}
 
+	seen := map[reflect.Type]string{}
 	var params []string
-	for i := 0; i < fnType.NumIn(); i++ {
-		paramType := goTypeToTS(fnType.In(i))
+	nIn := fnType.NumIn()
+	for i := 0; i < nIn; i++ {
+		paramType := goTypeToTS(fnType.In(i), seen)
+		if fnType.IsVariadic() && i == nIn-1 {
+			params = append(params, fmt.Sprintf("...arg%d: %s", i, paramType))
+			continue
+		}
 		params = append(params, fmt.Sprintf("arg%d: %s", i, paramType))
 	}
 
@@ -58,26 +64,24 @@ func bindingToTS(binding Binding) (string, error) {
 		if fnType.Out(0) == reflect.TypeOf((*error)(nil)).Elem() {
 			returnType = "void"
 		} else {
-			returnType = goTypeToTS(fnType.Out(0))
+			returnType = goTypeToTS(fnType.Out(0), seen)
 		}
 	} else if numOut >= 2 {
-		// The last output is typically error; the rest are return values
 		lastOut := fnType.Out(numOut - 1)
 		if lastOut == reflect.TypeOf((*error)(nil)).Elem() {
 			if numOut == 2 {
-				returnType = goTypeToTS(fnType.Out(0))
+				returnType = goTypeToTS(fnType.Out(0), seen)
 			} else {
-				// Multiple returns: tuple-like, represented as array in TS
 				var types []string
 				for i := 0; i < numOut-1; i++ {
-					types = append(types, goTypeToTS(fnType.Out(i)))
+					types = append(types, goTypeToTS(fnType.Out(i), seen))
 				}
 				returnType = "[" + strings.Join(types, ", ") + "]"
 			}
 		} else {
 			var types []string
 			for i := 0; i < numOut; i++ {
-				types = append(types, goTypeToTS(fnType.Out(i)))
+				types = append(types, goTypeToTS(fnType.Out(i), seen))
 			}
 			returnType = "[" + strings.Join(types, ", ") + "]"
 		}
@@ -86,7 +90,16 @@ func bindingToTS(binding Binding) (string, error) {
 	return fmt.Sprintf("%s(%s): Promise<%s>;", binding.Name, strings.Join(params, ", "), returnType), nil
 }
 
-func goTypeToTS(t reflect.Type) string {
+func goTypeToTS(t reflect.Type, seen map[reflect.Type]string) string {
+	if t == nil {
+		return "any"
+	}
+	if name, ok := seen[t]; ok {
+		if name == "" {
+			return "any"
+		}
+		return name
+	}
 	switch t.Kind() {
 	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
 		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64,
@@ -97,18 +110,18 @@ func goTypeToTS(t reflect.Type) string {
 	case reflect.Bool:
 		return "boolean"
 	case reflect.Slice, reflect.Array:
-		return goTypeToTS(t.Elem()) + "[]"
+		return goTypeToTS(t.Elem(), seen) + "[]"
 	case reflect.Map:
 		if t.Key().Kind() == reflect.String {
-			return fmt.Sprintf("Record<string, %s>", goTypeToTS(t.Elem()))
+			return fmt.Sprintf("Record<string, %s>", goTypeToTS(t.Elem(), seen))
 		}
 		return "Record<string, any>"
 	case reflect.Struct:
-		return goStructToTS(t)
+		return goStructToTS(t, seen)
 	case reflect.Interface:
 		return "any"
 	case reflect.Ptr:
-		return goTypeToTS(t.Elem())
+		return goTypeToTS(t.Elem(), seen)
 	case reflect.Func:
 		return "Function"
 	case reflect.Chan:
@@ -118,8 +131,10 @@ func goTypeToTS(t reflect.Type) string {
 	}
 }
 
-func goStructToTS(t reflect.Type) string {
+func goStructToTS(t reflect.Type, seen map[reflect.Type]string) string {
+	seen[t] = ""
 	if t.NumField() == 0 {
+		seen[t] = "object"
 		return "object"
 	}
 	var fields []string
@@ -133,13 +148,15 @@ func goStructToTS(t reflect.Type) string {
 		if jsonTag != "" {
 			parts := strings.Split(jsonTag, ",")
 			if parts[0] == "-" {
-				continue // field excluded from JSON, so omit it from the TS type
+				continue
 			}
 			if parts[0] != "" {
 				name = parts[0]
 			}
 		}
-		fields = append(fields, fmt.Sprintf("%s: %s", name, goTypeToTS(field.Type)))
+		fields = append(fields, fmt.Sprintf("%s: %s", name, goTypeToTS(field.Type, seen)))
 	}
-	return "{ " + strings.Join(fields, "; ") + " }"
+	s := "{ " + strings.Join(fields, "; ") + " }"
+	seen[t] = s
+	return s
 }

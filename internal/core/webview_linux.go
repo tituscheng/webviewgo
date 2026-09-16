@@ -95,18 +95,22 @@ static void windowHide(GtkWindow *window) {
     gtk_widget_hide(GTK_WIDGET(window));
 }
 
-static void windowSetMinSize(GtkWindow *window, int minW, int minH) {
+static void windowSetMinMaxSize(GtkWindow *window, int minW, int minH, int maxW, int maxH) {
     GdkGeometry geometry = {0};
-    geometry.min_width = minW;
-    geometry.min_height = minH;
-    gtk_window_set_geometry_hints(window, NULL, &geometry, GDK_HINT_MIN_SIZE);
-}
-
-static void windowSetMaxSize(GtkWindow *window, int maxW, int maxH) {
-    GdkGeometry geometry = {0};
-    geometry.max_width = maxW;
-    geometry.max_height = maxH;
-    gtk_window_set_geometry_hints(window, NULL, &geometry, GDK_HINT_MAX_SIZE);
+    GdkWindowHints hints = 0;
+    if (minW > 0 && minH > 0) {
+        geometry.min_width = minW;
+        geometry.min_height = minH;
+        hints |= GDK_HINT_MIN_SIZE;
+    }
+    if (maxW > 0 && maxH > 0) {
+        geometry.max_width = maxW;
+        geometry.max_height = maxH;
+        hints |= GDK_HINT_MAX_SIZE;
+    }
+    if (hints) {
+        gtk_window_set_geometry_hints(window, NULL, &geometry, hints);
+    }
 }
 
 static void windowSetFullscreen(GtkWindow *window, int on) {
@@ -203,6 +207,8 @@ type linuxWebView struct {
 	terminated  bool
 	pending     sync.WaitGroup
 	pump        *responsePump // batches Bind/BindRaw responses onto the GTK main thread
+	minW, minH  int
+	maxW, maxH  int
 }
 
 // init pins the main goroutine to the main OS thread. WebKitGTK/GTK requires
@@ -213,6 +219,8 @@ type linuxWebView struct {
 func init() {
 	runtime.LockOSThread()
 }
+
+func cBool(b bool) C.int { return C.int(boolInt(b)) }
 
 func newNative(opts types.Options) (Platform, error) {
 	title := C.CString(opts.Title)
@@ -240,7 +248,7 @@ func newNative(opts types.Options) (Platform, error) {
 
 	ua := C.CString(opts.UserAgent)
 	defer C.free(unsafe.Pointer(ua))
-	webView := C.createWebView(C.uintptr_t(wv.handle), boolInt(opts.Devtools), ua)
+	webView := C.createWebView(C.uintptr_t(wv.handle), cBool(opts.Devtools), ua)
 	if webView == nil {
 		return nil, fmt.Errorf("core: failed to create webview")
 	}
@@ -249,6 +257,7 @@ func newNative(opts types.Options) (Platform, error) {
 
 	gtkWindow := (*C.GtkWindow)(window)
 	C.gtk_container_add((*C.GtkContainer)(unsafe.Pointer(gtkWindow)), (*C.GtkWidget)(webView))
+	C.windowShow(gtkWindow)
 
 	destroySignal := C.CString("destroy")
 	C.g_signal_connect((*C.GObject)(unsafe.Pointer(gtkWindow)), destroySignal,
@@ -288,6 +297,9 @@ func (w *linuxWebView) isTerminated() bool {
 
 // evalAsync runs script on the GTK main thread; safe to call from a goroutine.
 func (w *linuxWebView) evalAsync(script string) {
+	if w.isTerminated() || w.webView == nil {
+		return
+	}
 	cs := C.CString(script)
 	defer C.free(unsafe.Pointer(cs))
 	C.evalOnMainThread((*C.WebKitWebView)(w.webView), cs)
@@ -332,21 +344,28 @@ func (w *linuxWebView) SetSize(width, height int, hint types.Hint) {
 	C.windowSetSize((*C.GtkWindow)(w.window), C.int(width), C.int(height))
 }
 
+func (w *linuxWebView) applyGeometry() {
+	C.windowSetMinMaxSize((*C.GtkWindow)(w.window),
+		C.int(w.minW), C.int(w.minH), C.int(w.maxW), C.int(w.maxH))
+}
+
 func (w *linuxWebView) SetMinSize(width, height int) {
-	C.windowSetMinSize((*C.GtkWindow)(w.window), C.int(width), C.int(height))
+	w.minW, w.minH = width, height
+	w.applyGeometry()
 }
 
 func (w *linuxWebView) SetMaxSize(width, height int) {
-	C.windowSetMaxSize((*C.GtkWindow)(w.window), C.int(width), C.int(height))
+	w.maxW, w.maxH = width, height
+	w.applyGeometry()
 }
 func (w *linuxWebView) SetFullscreen(fullscreen bool) {
-	C.windowSetFullscreen((*C.GtkWindow)(w.window), boolInt(fullscreen))
+	C.windowSetFullscreen((*C.GtkWindow)(w.window), cBool(fullscreen))
 }
 func (w *linuxWebView) SetAlwaysOnTop(alwaysOnTop bool) {
-	C.windowSetAlwaysOnTop((*C.GtkWindow)(w.window), boolInt(alwaysOnTop))
+	C.windowSetAlwaysOnTop((*C.GtkWindow)(w.window), cBool(alwaysOnTop))
 }
 func (w *linuxWebView) Show() { C.windowShow((*C.GtkWindow)(w.window)) }
-func (w *linuxWebView) Hide()                        { C.windowHide((*C.GtkWindow)(w.window)) }
+func (w *linuxWebView) Hide() { C.windowHide((*C.GtkWindow)(w.window)) }
 
 func (w *linuxWebView) Navigate(url string) error {
 	cs := C.CString(url)
@@ -409,7 +428,7 @@ func (w *linuxWebView) installBindingLocked(name string) {
 		return new Promise((resolve, reject) => {
 			const id = '__go_' + Math.random().toString(36).slice(2);
 			window[id] = { resolve, reject };
-			window.goBridge.postMessage({
+			window.webkit.messageHandlers.goBridge.postMessage({
 				bind: %q,
 				args: args,
 				cb: id

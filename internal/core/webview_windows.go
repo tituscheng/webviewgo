@@ -85,6 +85,8 @@ func init() {
 	runtime.LockOSThread()
 }
 
+func cBool(b bool) C.int { return C.int(boolInt(b)) }
+
 func newNative(opts types.Options) (Platform, error) {
 	if !windowsInstanceActive.CompareAndSwap(false, true) {
 		return nil, fmt.Errorf("core: only one webview instance is supported per process on windows")
@@ -116,6 +118,7 @@ func newNative(opts types.Options) (Platform, error) {
 		return nil, fmt.Errorf("core: failed to initialize WebView2. Ensure the WebView2 Runtime is installed.")
 	}
 
+	C.wvShow(hwnd)
 	return wv, nil
 }
 
@@ -188,13 +191,11 @@ func (w *windowsWebView) SetFullscreen(fullscreen bool) {
 }
 
 func (w *windowsWebView) SetAlwaysOnTop(alwaysOnTop bool) {
-	var flags C.UINT
+	insertAfter := C.HWND_NOTOPMOST
 	if alwaysOnTop {
-		flags = C.HWND_TOPMOST
-	} else {
-		flags = C.HWND_NOTOPMOST
+		insertAfter = C.HWND_TOPMOST
 	}
-	C.SetWindowPos(C.HWND(w.hwnd), C.HWND(flags), 0, 0, 0, 0,
+	C.SetWindowPos(C.HWND(w.hwnd), insertAfter, 0, 0, 0, 0,
 		C.SWP_NOMOVE|C.SWP_NOSIZE|C.SWP_SHOWWINDOW)
 }
 
@@ -228,6 +229,9 @@ func (w *windowsWebView) Eval(script string) error {
 
 // evalAsync runs script on the UI thread; safe to call from a goroutine.
 func (w *windowsWebView) evalAsync(script string) {
+	if w.isTerminated() {
+		return
+	}
 	cs := C.CString(script)
 	defer C.free(unsafe.Pointer(cs))
 	C.wvEvalAsync(cs)
@@ -295,7 +299,7 @@ func (w *windowsWebView) OpenDialog(opts types.OpenDialogOptions) ([]string, err
 
 	var count C.int
 	paths := C.openDialogW(
-		boolInt(opts.AllowFiles), boolInt(opts.AllowDirs), boolInt(opts.AllowMultiple),
+		cBool(opts.AllowFiles), cBool(opts.AllowDirs), cBool(opts.AllowMultiple),
 		ctitle, cdir, &count,
 	)
 	if paths == nil {
@@ -416,9 +420,6 @@ func goWebViewWindowWillClose(handle C.uintptr_t) {
 }
 
 func utf8ToWide(s string) *C.wchar_t {
-	if s == "" {
-		return nil
-	}
 	cs := C.CString(s)
 	defer C.free(unsafe.Pointer(cs))
 	len := C.MultiByteToWideChar(C.CP_UTF8, 0, cs, -1, nil, 0)

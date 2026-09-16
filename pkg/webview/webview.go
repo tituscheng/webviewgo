@@ -248,6 +248,9 @@ func (w *webview) RegisterScheme(scheme string, handler SchemeHandler) error {
 }
 
 func (w *webview) OpenDialog(opts OpenDialogOptions) ([]string, error) {
+	if !opts.AllowFiles && !opts.AllowDirs {
+		opts.AllowFiles = true
+	}
 	return w.platform.OpenDialog(opts)
 }
 

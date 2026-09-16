@@ -68,6 +68,56 @@ func TestDispatchBridgeMessage_UnknownBindingRejects(t *testing.T) {
 	}
 }
 
+func TestDispatchBridgeMessage_PanicRejects(t *testing.T) {
+	var mu sync.Mutex
+	var scripts []string
+	host := newPlatformBridgeHost(
+		func(string) bridgeBindings {
+			return bridgeBindings{normal: func([]any) (any, error) {
+				panic("boom")
+			}}
+		},
+		func() bool { return false },
+		func(s string) {
+			mu.Lock()
+			scripts = append(scripts, s)
+			mu.Unlock()
+		},
+		nil,
+	)
+	dispatchBridgeMessage(host, bridgeMessage{
+		Bind: "fn",
+		Args: json.RawMessage(`[]`),
+		CB:   "__go_cb1",
+	})
+	deadline := time.After(2 * time.Second)
+	for {
+		mu.Lock()
+		n := len(scripts)
+		sample := strings.Join(scripts, "")
+		mu.Unlock()
+		if n > 0 {
+			if !strings.Contains(sample, "binding panic") {
+				t.Fatalf("expected panic reject, got %q", sample)
+			}
+			return
+		}
+		select {
+		case <-deadline:
+			t.Fatal("expected reject script after panic")
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+}
+
+func TestBindResponseScript_InvalidArgsReject(t *testing.T) {
+	got := bindResponseScript("__go_x", json.RawMessage(`{`), nil,
+		func([]any) (any, error) { return 1, nil })
+	if !strings.Contains(got, "invalid binding args") {
+		t.Fatalf("expected args reject, got %q", got)
+	}
+}
+
 func TestDispatchBridgeMessage_InvalidCallbackIgnored(t *testing.T) {
 	var mu sync.Mutex
 	delivered := 0

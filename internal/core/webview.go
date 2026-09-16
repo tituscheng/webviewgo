@@ -86,6 +86,13 @@ func logOpts(opts types.Options) *slog.Logger {
 	return slog.Default()
 }
 
+func boolInt(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
+}
+
 // bindResponseScript runs the matched binding and returns the JavaScript that
 // settles the promise identified by cb. Exactly one of rawFn / normalFn is
 // non-nil. The logic is platform-independent; each backend supplies the
@@ -114,12 +121,19 @@ func bindResponseScript(cb string, args json.RawMessage,
 	}
 
 	var a []any
-	_ = json.Unmarshal(args, &a) // best effort; nil flows into the binding as no args
+	if len(args) > 0 {
+		if err := json.Unmarshal(args, &a); err != nil {
+			return reject(fmt.Errorf("invalid binding args: %w", err))
+		}
+	}
 	res, err := normalFn(a)
 	if err != nil {
 		return reject(err)
 	}
-	rs, _ := json.Marshal(res)
+	rs, err := json.Marshal(res)
+	if err != nil {
+		return reject(err)
+	}
 	return fmt.Sprintf("window['%s'].resolve(%s); delete window['%s'];", cb, rs, cb)
 }
 

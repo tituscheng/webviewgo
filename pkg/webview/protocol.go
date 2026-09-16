@@ -46,14 +46,15 @@ func FSHandler(fsys any, prefix string) SchemeHandler {
 			return &Response{StatusCode: http.StatusBadRequest}
 		}
 
-		p := strings.TrimPrefix(u.Path, prefix)
-		p = path.Clean("/" + p)
-		if strings.Contains(p, "..") {
-			return &Response{StatusCode: http.StatusForbidden}
+		p, ok := stripSchemePrefix(u.Path, prefix)
+		if !ok {
+			return &Response{StatusCode: http.StatusNotFound}
 		}
-		p = strings.TrimPrefix(p, "/")
 		if p == "" {
 			p = "index.html"
+		}
+		if !fs.ValidPath(p) {
+			return &Response{StatusCode: http.StatusForbidden}
 		}
 
 		f, err := filesystem.Open(p)
@@ -67,7 +68,6 @@ func FSHandler(fsys any, prefix string) SchemeHandler {
 			return &Response{StatusCode: http.StatusInternalServerError}
 		}
 		if info.IsDir() {
-			// Try index.html inside the directory
 			indexPath := path.Join(p, "index.html")
 			idx, err := filesystem.Open(indexPath)
 			if err != nil {
@@ -78,6 +78,11 @@ func FSHandler(fsys any, prefix string) SchemeHandler {
 			p = indexPath
 		}
 
+		data, err := io.ReadAll(io.LimitReader(f, maxSchemeBodySize))
+		if err != nil {
+			return &Response{StatusCode: http.StatusInternalServerError}
+		}
+
 		ct := mime.TypeByExtension(path.Ext(p))
 		if ct == "" {
 			ct = "application/octet-stream"
@@ -86,9 +91,29 @@ func FSHandler(fsys any, prefix string) SchemeHandler {
 		return &Response{
 			StatusCode: http.StatusOK,
 			Headers:    http.Header{"Content-Type": {ct}},
-			Body:       f,
+			Body:       io.NopCloser(bytes.NewReader(data)),
 		}
 	}
+}
+
+// stripSchemePrefix removes prefix from the URL path. prefix must match a
+// full path segment ("/assets" does not match "/assetsfoo").
+func stripSchemePrefix(urlPath, prefix string) (string, bool) {
+	p := path.Clean("/" + urlPath)
+	if prefix != "" {
+		pref := path.Clean("/" + strings.TrimSuffix(prefix, "/"))
+		if pref != "/" {
+			if p != pref && !strings.HasPrefix(p, pref+"/") {
+				return "", false
+			}
+			p = strings.TrimPrefix(p, pref)
+			if p == "" {
+				p = "/"
+			}
+		}
+	}
+	p = strings.TrimPrefix(path.Clean("/"+p), "/")
+	return p, true
 }
 
 // HTTPHandler returns a SchemeHandler that adapts a standard http.Handler.
@@ -117,8 +142,8 @@ func HTTPHandler(h http.Handler) SchemeHandler {
 
 		res := rr.Result()
 		return &Response{
-			StatusCode: rr.Code,
-			Headers:    rr.Header(),
+			StatusCode: res.StatusCode,
+			Headers:    res.Header,
 			Body:       res.Body,
 		}
 	}

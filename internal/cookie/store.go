@@ -6,14 +6,15 @@ import (
 	"embed"
 	"errors"
 	"fmt"
+	"net"
 	"net/url"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/tituscheng/webviewgo/internal/types"
-	sqlite "github.com/glebarez/go-sqlite"
 	_ "github.com/glebarez/go-sqlite" // driver; shared with glebarez/gorm consumers
+	sqlite "github.com/glebarez/go-sqlite"
+	"github.com/tituscheng/webviewgo/internal/types"
 )
 
 //go:embed schema/*.sql
@@ -107,6 +108,10 @@ func (s *Store) GetCookies(ctx context.Context, rawURL, sessionID string) ([]typ
 	}
 
 	host := canonicalHost(u.Hostname())
+	reqPath := u.Path
+	if reqPath == "" {
+		reqPath = "/"
+	}
 	secureChannel := u.Scheme == "https" || u.Scheme == "wss"
 
 	// Candidate selection is scoped to the session in SQL; the finer-grained
@@ -142,7 +147,7 @@ func (s *Store) GetCookies(ctx context.Context, rawURL, sessionID string) ([]typ
 		if !domainMatch(host, c.Domain, c.HostOnly) {
 			continue
 		}
-		if !pathMatch(u.Path, c.Path) {
+		if !pathMatch(reqPath, c.Path) {
 			continue
 		}
 		cookies = append(cookies, c)
@@ -216,17 +221,20 @@ func domainMatch(host, cookieDomain string, hostOnly bool) bool {
 	if hostOnly {
 		return false
 	}
+	if net.ParseIP(host) != nil || net.ParseIP(cookieDomain) != nil {
+		return false
+	}
 	return strings.HasSuffix(host, "."+cookieDomain)
 }
 
-// DeleteCookie removes a specific cookie.
-func (s *Store) DeleteCookie(ctx context.Context, name, domain, path string) error {
+// DeleteCookie removes a specific cookie in the given session.
+func (s *Store) DeleteCookie(ctx context.Context, sessionID, name, domain, path string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	_, err := s.db.ExecContext(ctx, `
-		DELETE FROM cookies WHERE name = ? AND domain = ? AND path = ?
-	`, name, domain, path)
+		DELETE FROM cookies WHERE session_id = ? AND name = ? AND domain = ? AND path = ?
+	`, sessionID, name, domain, path)
 	if err != nil {
 		return fmt.Errorf("cookie: delete cookie: %w", err)
 	}

@@ -170,7 +170,7 @@ func (w *darwinWebView) OpenDialog(opts types.OpenDialogOptions) ([]string, erro
 		defer C.freeCStringArray(filterExts, C.int(filterCount))
 	}
 	paths := C.openDialog(
-		boolInt(opts.AllowFiles), boolInt(opts.AllowDirs), boolInt(opts.AllowMultiple),
+		cBool(opts.AllowFiles), cBool(opts.AllowDirs), cBool(opts.AllowMultiple),
 		title, dir, defFile, filterExts, C.int(filterCount), &count,
 	)
 	if paths == nil {

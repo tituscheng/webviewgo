@@ -92,6 +92,7 @@ static void *createWindow(int width, int height, int styleMask, const char *titl
                                                    styleMask:styleMask
                                                      backing:NSBackingStoreBuffered
                                                        defer:NO];
+    [window setReleasedWhenClosed:NO];
     [window setTitle:[NSString stringWithUTF8String:title]];
     if (center) {
         [window center];
@@ -334,6 +335,8 @@ func init() {
 	runtime.LockOSThread()
 }
 
+func cBool(b bool) C.int { return C.int(boolInt(b)) }
+
 func newNative(opts types.Options) (Platform, error) {
 	C.setActivationPolicyRegular()
 	C.installEditMenu()
@@ -354,7 +357,7 @@ func newNative(opts types.Options) (Platform, error) {
 		}
 	}
 
-	window := C.createWindow(C.int(opts.Width), C.int(opts.Height), styleMask, title, boolInt(opts.Center))
+	window := C.createWindow(C.int(opts.Width), C.int(opts.Height), styleMask, title, cBool(opts.Center))
 	if window == nil {
 		return nil, fmt.Errorf("core: failed to create window")
 	}
@@ -385,7 +388,7 @@ func newNative(opts types.Options) (Platform, error) {
 		schemeArr = &schemeNames[0]
 	}
 
-	webView := C.createWebView(window, C.uintptr_t(wv.handle), boolInt(opts.Devtools),
+	webView := C.createWebView(window, C.uintptr_t(wv.handle), cBool(opts.Devtools),
 		schemeArr, C.int(len(schemeNames)))
 	if webView == nil {
 		return nil, fmt.Errorf("core: failed to create webview")
@@ -482,11 +485,11 @@ func (w *darwinWebView) SetMaxSize(width, height int) {
 }
 
 func (w *darwinWebView) SetFullscreen(fullscreen bool) {
-	C.windowSetFullscreen(w.window, boolInt(fullscreen))
+	C.windowSetFullscreen(w.window, cBool(fullscreen))
 }
 
 func (w *darwinWebView) SetAlwaysOnTop(alwaysOnTop bool) {
-	C.windowSetAlwaysOnTop(w.window, boolInt(alwaysOnTop))
+	C.windowSetAlwaysOnTop(w.window, cBool(alwaysOnTop))
 }
 
 func (w *darwinWebView) Show() {
@@ -582,6 +585,9 @@ func (w *darwinWebView) installBindingLocked(name string) {
 
 // evalAsync runs script on the main thread; safe to call from a goroutine.
 func (w *darwinWebView) evalAsync(script string) {
+	if w.isTerminated() || w.webView == nil {
+		return
+	}
 	cs := C.CString(script)
 	defer C.free(unsafe.Pointer(cs))
 	C.webViewEvalAsync(w.webView, cs)
@@ -657,11 +663,4 @@ func goWebViewWindowWillClose(handle C.uintptr_t) {
 //export goWebViewNavigationFinished
 func goWebViewNavigationFinished(handle C.uintptr_t, url *C.char) {
 	// Hook for future use (e.g., protocol injection)
-}
-
-func boolInt(b bool) C.int {
-	if b {
-		return 1
-	}
-	return 0
 }

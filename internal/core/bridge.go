@@ -80,6 +80,9 @@ func dispatchBridgeMessage(host bridgeHost, msg bridgeMessage) {
 		defer func() {
 			if r := recover(); r != nil {
 				log.Error("binding callback panic", "name", bindName, "recover", r)
+				if !host.isTerminated() {
+					host.enqueueScript(bindRejectScript(msg.CB, fmt.Sprintf("binding panic: %v", r)))
+				}
 			}
 		}()
 
@@ -109,10 +112,10 @@ func parseBridgeMessage(host bridgeHost, body string) bool {
 }
 
 type platformBridgeHost struct {
-	lookup   func(name string) bridgeBindings
-	term     func() bool
-	enqueue  func(string)
-	log      *slog.Logger
+	lookup  func(name string) bridgeBindings
+	term    func() bool
+	enqueue func(string)
+	log     *slog.Logger
 }
 
 func (h platformBridgeHost) lookupBinding(name string) bridgeBindings { return h.lookup(name) }

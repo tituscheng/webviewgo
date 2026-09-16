@@ -38,7 +38,7 @@ Comprehensive inventory of all known gaps, stubs, TODOs, and technical debt in t
 
 | # | Severity | Description | File(s) | Status | Notes |
 |---|----------|-------------|---------|--------|-------|
-| L01 | 🔴 | JS bridge uses WKWebView API instead of WebKitGTK | `internal/core/webview_linux.go` | ✅ Fixed | Injected JS now uses `window.goBridge.postMessage` |
+| L01 | 🔴 | JS bridge uses WKWebView API instead of WebKitGTK | `internal/core/webview_linux.go` | ✅ Fixed | Injected JS uses `window.webkit.messageHandlers.goBridge.postMessage` (WebKitGTK exposes the same handler object as WKWebView) |
 | L02 | 🔴 | `Eval()` called from goroutine (GTK thread safety) | `internal/core/webview_linux.go` | ✅ Fixed | Responses now queued via `g_idle_add` to run on GTK main thread |
 | L03 | 🟠 | Custom protocols not implemented | `internal/core/protocol_linux.go` | ✅ Fixed | `webkit_web_context_register_uri_scheme` with async Go handler + response delivery |
 | L04 | 🟠 | Dialogs not implemented | `internal/core/dialog_linux.go` | ✅ Fixed | GTK file chooser + message dialog |
@@ -104,6 +104,11 @@ Comprehensive inventory of all known gaps, stubs, TODOs, and technical debt in t
 | A08 | `Eval()` API contract fix: `(any, error)` → `error` | `pkg/webview/webview.go`, `internal/core/*` | v0.2 | All backends discarded eval results; signature falsely promised return values. Reverted to `error`-only to match original library contract. |
 | D11 | Binding callback panic recovery + post-Destroy guard | `internal/core/webview_darwin.go`, `webview_linux.go`, `webview_windows.go` | v0.2 | Goroutines could panic silently or call `Eval` on freed native objects after `Destroy`. Added `recover()` and `terminated` check. |
 | D12 | Scheme response Body close leak | `internal/core/protocol_darwin.go` | v0.2 | `FSHandler` and `HTTPHandler` returned live readers that were never closed after `io.ReadAll`. |
+| D16 | `FSHandler` deferred Close before platform ReadAll | `pkg/webview/protocol.go` | v0.4.0 | Handler now copies bytes into a `NopCloser` so `os.DirFS` files are not closed before delivery. |
+| D17 | Cookie jar Domain tossing / Max-Age / empty path | `internal/cookie/jar.go`, `store.go` | v0.4.0 | RFC 6265 domain-attribute checks, Max-Age, default-path, empty request path. |
+| D18 | Linux custom scheme APIs / UAF / GTK thread | `internal/core/protocol_linux.go` | v0.4.0 | Real WebKitGTK finish APIs, steal-before-free, `g_idle_add` delivery. |
+| D19 | Windows JS bridge vtable indexes | `internal/core/webview_windows.c` | v0.4.0 | `get_WebMessageAsJson` slot 4; permission kind/state 4/7; ExecuteScript handler arity. |
+| D20 | MRC `schemeTaskMap` autorelease | `internal/core/protocol_darwin_delegate.m` | v0.4.0 | Alloc/init under `dispatch_once`. |
 | D13 | Scheme task lifetime coordination with Destroy | `internal/core/protocol_darwin.go`, `webview_darwin.go` | v0.2 | Pending scheme goroutines could outlive the WKWebView. Added `terminated` guards and `sync.WaitGroup` drain in `Destroy`. |
 | D14 | macOS scheme registration wired at webview creation | `internal/core/webview_darwin.go`, `internal/types/types.go` | v0.3 | `Options.Schemes` pre-registers handlers on `WKWebViewConfiguration`; late `RegisterScheme` returns clear error. |
 | D15 | Bridge callback id validation + unknown binding reject | `internal/core/bridge.go` | v0.3 | Prevents JS injection via crafted `cb` field; rejects unknown bindings instead of hanging promises. |

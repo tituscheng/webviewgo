@@ -62,9 +62,12 @@ type Cookie struct {
 type SameSite int
 
 const (
-	SameSiteNone SameSite = iota
+	// SameSiteDefault means the cookie did not specify SameSite. Browsers
+	// treat this as Lax. Zero value so unset cookies are not synced as None.
+	SameSiteDefault SameSite = iota
 	SameSiteLax
 	SameSiteStrict
+	SameSiteNone
 )
 
 // CookieManager controls cookie storage and synchronization.

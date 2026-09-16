@@ -12,7 +12,7 @@
         NSError *err = nil;
         NSData *data = [NSJSONSerialization dataWithJSONObject:message.body options:0 error:&err];
         if (!err && data) {
-            body = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+            body = [[[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] autorelease];
         }
     }
     char *cname = strdup([name UTF8String]);

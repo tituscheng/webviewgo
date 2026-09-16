@@ -1,6 +1,8 @@
 package cookie
 
 import (
+	"net/http"
+	"net/url"
 	"testing"
 
 	"github.com/tituscheng/webviewgo/internal/types"
@@ -117,6 +119,25 @@ func TestManager_AsJar(t *testing.T) {
 	jar := m.AsJar()
 	if jar == nil {
 		t.Fatal("expected non-nil jar")
+	}
+}
+
+func TestManager_AsJarFlushes(t *testing.T) {
+	m, err := NewManager(":memory:")
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	defer m.Close()
+
+	var n int
+	m.SetSyncCallback(func([]types.Cookie) error {
+		n++
+		return nil
+	})
+	u, _ := url.Parse("https://example.com/")
+	m.AsJar().SetCookies(u, []*http.Cookie{{Name: "a", Value: "1"}})
+	if n == 0 {
+		t.Fatal("AsJar SetCookies should flush to native sync callback")
 	}
 }
 

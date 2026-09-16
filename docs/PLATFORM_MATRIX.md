@@ -63,7 +63,7 @@ Feature-by-platform capability matrix. This is the source of truth for what work
 | `FSHandler` adapter | ✅ | ✅ | ✅ | ✅ |
 | `HTTPHandler` adapter | ✅ | ✅ | ✅ | ✅ |
 | Response delivery | ✅ | ✅ | ❌ | ➖ |
-| Request body forwarding | ✅ | ✅ | ➖ | ➖ |
+| Request body forwarding | ✅ (`HTTPBody` + `HTTPBodyStream`) | ✅ | ➖ | ➖ |
 
 ## Cookies & Sessions
 

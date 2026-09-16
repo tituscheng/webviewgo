@@ -9,7 +9,7 @@ This roadmap prioritizes gaps by impact and effort. Each phase builds on the pre
 
 | # | Task | File(s) | Effort | Status |
 |---|------|---------|--------|--------|
-| 1.1 | Fix JS bridge API: change `window.webkit.messageHandlers.goBridge` to `window.goBridge` in injected JS | `internal/core/webview_linux.go` | ~1 hr | ✅ Done |
+| 1.1 | Fix JS bridge API: use `window.webkit.messageHandlers.goBridge.postMessage` (WebKitGTK’s real handler) | `internal/core/webview_linux.go` | ~1 hr | ✅ Done |
 | 1.2 | Fix `Eval()` thread safety: dispatch JS responses via `g_idle_add` on GTK main thread | `internal/core/webview_linux.go` | ~2 hrs | ✅ Done |
 | 1.3 | Add smoke test for Linux JS roundtrip (can be manual for now) | — | ~30 min | 🚧 Deferred to CI |
 

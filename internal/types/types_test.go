@@ -81,14 +81,17 @@ func TestHintConstants(t *testing.T) {
 }
 
 func TestSameSiteConstants(t *testing.T) {
-	if SameSiteNone != 0 {
-		t.Errorf("SameSiteNone expected 0, got %d", SameSiteNone)
+	if SameSiteDefault != 0 {
+		t.Errorf("SameSiteDefault expected 0, got %d", SameSiteDefault)
 	}
 	if SameSiteLax != 1 {
 		t.Errorf("SameSiteLax expected 1, got %d", SameSiteLax)
 	}
 	if SameSiteStrict != 2 {
 		t.Errorf("SameSiteStrict expected 2, got %d", SameSiteStrict)
+	}
+	if SameSiteNone != 3 {
+		t.Errorf("SameSiteNone expected 3, got %d", SameSiteNone)
 	}
 }
 

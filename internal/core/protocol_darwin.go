@@ -63,6 +63,7 @@ func goProtocolHandler(handle C.uintptr_t, scheme *C.char, url *C.char, method *
 	headers *C.char, body unsafe.Pointer, bodyLen C.int, reqHandle C.uintptr_t) {
 	wv, ok := getPlatform(uintptr(handle))
 	if !ok {
+		deliverText(reqHandle, http.StatusServiceUnavailable, "Service Unavailable")
 		return
 	}
 	dw := wv.(*darwinWebView)

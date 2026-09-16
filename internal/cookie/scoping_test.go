@@ -77,6 +77,30 @@ func TestStore_SecureScheme(t *testing.T) {
 
 // A malformed cookie with an empty domain must never match a request, rather
 // than being broadcast everywhere.
+func TestStore_EmptyRequestPath(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	if err := s.SetCookie(ctx, types.Cookie{Name: "id", Value: "1", Domain: "example.com", Path: "/"}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.GetCookies(ctx, "https://example.com", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("empty URL path should match Path=/, got %+v", got)
+	}
+}
+
+func TestDomainMatch_IPLiteral(t *testing.T) {
+	if domainMatch("192.168.1.1", "168.1.1", false) {
+		t.Error("IP hosts must not suffix-match")
+	}
+	if !domainMatch("192.168.1.1", "192.168.1.1", true) {
+		t.Error("exact IP match should succeed")
+	}
+}
+
 func TestDomainMatch_EmptyDomain(t *testing.T) {
 	if domainMatch("example.com", "", true) {
 		t.Error("host-only cookie with empty domain should not match")

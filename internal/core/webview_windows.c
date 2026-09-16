@@ -1,5 +1,6 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#include <ole2.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -65,8 +66,8 @@ static HRESULT STDMETHODCALLTYPE wv2_navigate_to_string(ICoreWebView2 *wv, LPCWS
 }
 
 static HRESULT STDMETHODCALLTYPE wv2_execute_script(ICoreWebView2 *wv, LPCWSTR script) {
-    typedef HRESULT (STDMETHODCALLTYPE *Fn)(ICoreWebView2 *, LPCWSTR);
-    return ((Fn)((void ***)wv)[0][WV2_EXECUTE_SCRIPT])(wv, script);
+    typedef HRESULT (STDMETHODCALLTYPE *Fn)(ICoreWebView2 *, LPCWSTR, IUnknown *);
+    return ((Fn)((void ***)wv)[0][WV2_EXECUTE_SCRIPT])(wv, script, NULL);
 }
 
 static HRESULT STDMETHODCALLTYPE wv2_add_script_on_document_created(ICoreWebView2 *wv, LPCWSTR script, IUnknown *handler) {
@@ -195,6 +196,7 @@ static HRESULT STDMETHODCALLTYPE envHandler_Invoke(IUnknown *self, HRESULT error
             return E_FAIL;
         }
         g_controller = controller;
+        ((IUnknown *)controller)->lpVtbl->AddRef((IUnknown *)controller);
 
         ICoreWebView2 *wv = NULL;
         if (SUCCEEDED(wvc_get_core_webview2(controller, &wv)) && wv) {
@@ -216,11 +218,10 @@ static HRESULT STDMETHODCALLTYPE envHandler_Invoke(IUnknown *self, HRESULT error
                 (void)s; (void)sender;
                 if (!args) return S_OK;
 
-                // Extract the web message (JSON string) from args
-                // ICoreWebView2WebMessageReceivedEventArgs has get_WebMessageAsJson at index 3
+                // ICoreWebView2WebMessageReceivedEventArgs: 3=get_Source, 4=get_WebMessageAsJson
                 typedef HRESULT (STDMETHODCALLTYPE *GetJsonFn)(ICoreWebView2WebMessageReceivedEventArgs *, LPWSTR *);
                 LPWSTR json = NULL;
-                HRESULT hr = ((GetJsonFn)((void ***)args)[0][3])(args, &json);
+                HRESULT hr = ((GetJsonFn)((void ***)args)[0][4])(args, &json);
                 if (SUCCEEDED(hr) && json) {
                     // Convert UTF-16 to UTF-8
                     int len = WideCharToMultiByte(CP_UTF8, 0, json, -1, NULL, 0, NULL, NULL);
@@ -255,13 +256,13 @@ static HRESULT STDMETHODCALLTYPE envHandler_Invoke(IUnknown *self, HRESULT error
                 (void)s; (void)sender;
                 if (!args) return S_OK;
                 // ICoreWebView2PermissionRequestedEventArgs:
-                // 3=get_PermissionKind, 6=put_State
+                // 3=get_Uri, 4=get_PermissionKind, 7=put_State
                 typedef HRESULT (STDMETHODCALLTYPE *GetKindFn)(ICoreWebView2PermissionRequestedEventArgs *, int *);
                 typedef HRESULT (STDMETHODCALLTYPE *PutStateFn)(ICoreWebView2PermissionRequestedEventArgs *, int);
                 int kind = 0;
-                HRESULT hr = ((GetKindFn)((void ***)args)[0][3])(args, &kind);
+                HRESULT hr = ((GetKindFn)((void ***)args)[0][4])(args, &kind);
                 if (SUCCEEDED(hr) && kind == 6) { // COREWEBVIEW2_PERMISSION_KIND_CLIPBOARD_READ
-                    ((PutStateFn)((void ***)args)[0][6])(args, 1); // COREWEBVIEW2_PERMISSION_STATE_ALLOW
+                    ((PutStateFn)((void ***)args)[0][7])(args, 1); // COREWEBVIEW2_PERMISSION_STATE_ALLOW
                 }
                 return S_OK;
             }
@@ -340,6 +341,7 @@ int wvInitWebView2(HWND hwnd, uintptr_t handle, int width, int height) {
     (void)width; (void)height;
     g_hwnd = hwnd;
     g_handle = handle;
+    OleInitialize(NULL);
 
     g_webview2 = LoadLibrary("WebView2Loader.dll");
     if (!g_webview2) {
@@ -604,23 +606,42 @@ char **openDialogW(int allowFiles, int allowDirs, int allowMultiple,
     }
 
     if (allowMultiple && count > 1) {
-        wchar_t dir[MAX_PATH];
+        size_t dirLen = wcslen(fileBuffer);
+        wchar_t *dir = (wchar_t *)malloc((dirLen + 2) * sizeof(wchar_t));
+        if (!dir) {
+            free(result);
+            *outCount = 0;
+            return NULL;
+        }
         wcscpy(dir, fileBuffer);
-        int dirLen = wcslen(dir);
-        if (dir[dirLen - 1] != L'\\' && dir[dirLen - 1] != L'/') {
-            wcscat(dir, L"\\");
+        if (dirLen == 0 || (dir[dirLen - 1] != L'\\' && dir[dirLen - 1] != L'/')) {
+            dir[dirLen] = L'\\';
+            dir[dirLen + 1] = L'\0';
+            dirLen++;
         }
 
         wchar_t *p = fileBuffer + wcslen(fileBuffer) + 1;
         for (int i = 0; i < count; i++) {
-            wchar_t fullPath[MAX_PATH];
+            size_t nameLen = wcslen(p);
+            wchar_t *fullPath = (wchar_t *)malloc((dirLen + nameLen + 1) * sizeof(wchar_t));
+            if (!fullPath) {
+                for (int j = 0; j < i; j++) free(result[j]);
+                free(result);
+                free(dir);
+                *outCount = 0;
+                return NULL;
+            }
             wcscpy(fullPath, dir);
             wcscat(fullPath, p);
             int len = WideCharToMultiByte(CP_UTF8, 0, fullPath, -1, NULL, 0, NULL, NULL);
-            result[i] = (char *)malloc(len);
-            WideCharToMultiByte(CP_UTF8, 0, fullPath, -1, result[i], len, NULL, NULL);
-            p += wcslen(p) + 1;
+            result[i] = (char *)malloc(len > 0 ? (size_t)len : 1);
+            if (result[i] && len > 0) {
+                WideCharToMultiByte(CP_UTF8, 0, fullPath, -1, result[i], len, NULL, NULL);
+            }
+            free(fullPath);
+            p += nameLen + 1;
         }
+        free(dir);
     } else {
         int len = WideCharToMultiByte(CP_UTF8, 0, fileBuffer, -1, NULL, 0, NULL, NULL);
         result[0] = (char *)malloc(len);

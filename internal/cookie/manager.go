@@ -44,7 +44,10 @@ func (m *Manager) GetCookies(url string, sessionID string) ([]types.Cookie, erro
 // DeleteCookie removes a specific cookie.
 func (m *Manager) DeleteCookie(name, domain, path string) error {
 	ctx := context.Background()
-	if err := m.store.DeleteCookie(ctx, name, domain, path); err != nil {
+	m.mu.RLock()
+	sid := m.sessionID
+	m.mu.RUnlock()
+	if err := m.store.DeleteCookie(ctx, sid, name, domain, path); err != nil {
 		return err
 	}
 	return m.flush(ctx)
@@ -98,7 +101,9 @@ func (m *Manager) AsJar() http.CookieJar {
 	m.mu.RLock()
 	sid := m.sessionID
 	m.mu.RUnlock()
-	return NewJar(m.store, sid)
+	j := NewJar(m.store, sid)
+	j.flushFn = func() error { return m.flush(context.Background()) }
+	return j
 }
 
 // Close releases resources.
